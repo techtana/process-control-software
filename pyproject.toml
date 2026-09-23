@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "process-control-software"
-version = "0.1.0"
+name = "r2r-control"
+version = "0.2.0"
 description = "Run-to-run (R2R) process control: identification, experiment planning, MHE/MPC simulation, controller optimization, diagnostics, and broad predictive regression — unified by variance accounting against a noise floor."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,9 +21,11 @@ viz = ["matplotlib>=3.6"]
 test = ["pytest>=7.0", "matplotlib>=3.6"]
 
 [tool.setuptools.packages.find]
-include = ["process_control*"]
+where = ["src"]
+include = ["r2r_control*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

@@ -1,117 +1,193 @@
 # Architecture & Theory Reference
 
-This is the self-contained handoff document (NFR-05): theory → workflow →
-implementation → validation, so a future session continues without re-deriving
-context.
+The self-contained handoff document (NFR-05): theory → workflow →
+implementation → validation, so a future session can continue without
+re-deriving context.
 
 ## The one idea: a noise floor everywhere
 
-Every estimation/control decision is "is this variation signal or noise?".
-Two floors answer it, and the system uses them consistently:
+Every estimation or control decision asks the same thing: is this variation
+signal or noise? Two floors answer it:
 
-- **Estimation floor — Marchenko–Pastur.** Eigenvalues of a sample correlation
-  matrix of pure noise fall below `(1 + √q)²`, `q = N/T`. A direction above the
-  edge carries common structure (the "8-vs-392" split in high-dim regression).
-  Implemented in `foundations/noise_floor.py`. When the balanced-panel
-  assumption fails (sparse metrology), the analytic edge is **refused** and a
-  permutation null replaces it.
-- **Control floor — minimum-variance / Harris.** The smallest output variance
-  any controller can achieve is the variance of the delay-step-ahead
-  unforecastable disturbance. `harris_index = achieved / minimum`. A value near
-  1 means "done; the rest is irreducible". Implemented in the same module and
-  consumed by the simulator (SIM-06) and diagnostics (DIAG-05).
+- **Estimation floor: Marchenko–Pastur.** Eigenvalues of a pure-noise sample
+  correlation matrix stay below `(1 + √q)²`, `q = N/T`
+  (`core/noise_floor/analytic.py`). When the balanced-panel assumption fails
+  (sparse metrology), the analytic edge is **refused** and an empirical null
+  replaces it.
+- **Control floor: minimum variance / Harris.** The smallest achievable output
+  variance is the variance of the unforecastable delay-step-ahead disturbance.
+  `harris_index = achieved / minimum`, and a value near 1 means the controller
+  is done.
 
-Two notions of "rank" are kept distinct because they answer different questions:
+### The empirical floor must preserve structure (NF-03, E6)
 
-| Notion | Question | Where used |
-|--------|----------|------------|
-| **numerical rank** (singular values above a relative gap) | how many directions are *excited enough to identify*? | model-order selection (FB-02), gap localization (EP-01) |
-| **MP signal rank** (eigenvalues above the floor) | how many directions carry *common low-rank structure*? | high-dim feature/latent screening (REG-03), confounding narrative |
+A plain per-column time shuffle kills cross-correlation, which is intended, but
+it also kills **autocorrelation**. For autocorrelated or drifting data, that
+makes the null too small, so autocorrelated noise gets read as signal.
+`core/noise_floor/empirical.py` therefore builds each null from surrogates
+that keep each series' marginal distribution, autocorrelation, and missingness
+pattern:
 
-A designed orthogonal experiment is full **numerical** rank (every direction
-excited) but has **no MP spikes** (excitation is uniform, not low-rank). Using
-the MP spike-count for DOE order selection would wrongly report rank 0 — so the
-engine selects order by numerical rank. This distinction is the single most
-important implementation subtlety in the codebase.
+- **block permutation** (default): the series is cut into contiguous blocks
+  whose order is shuffled. The block logic is shared with the block bootstrap
+  (`core/validation/block_bootstrap.py`, VAL-05), so "block" means the same
+  thing everywhere.
+- **phase randomization**: this keeps the power spectrum exactly.
 
-## The central obstacle: closed-loop confounding
+In the tests, pure AR(1) noise (φ = 0.85) yields a top eigenvalue of about
+1.43. The plain-shuffle 99th-percentile floor is about 1.37, which would call
+that noise signal. The block and phase floors are about 1.85 and 1.95, which
+correctly call it noise. The API rejects a `"shuffle"` surrogate outright.
+
+### Two notions of rank
+
+| Notion | Question | Used for |
+|---|---|---|
+| **numerical rank** (singular values above a relative gap) | how many directions are excited enough to identify? | model order (FB-02), gap localization (EP-01) |
+| **MP signal rank** (eigenvalues above the floor) | how many directions carry common low-rank structure? | high-dimensional screening (REG-03) |
+
+A designed orthogonal experiment has full numerical rank but **no** MP spikes,
+so order selection has to use numerical rank.
+
+## Layers and the dependency rule (§16)
+
+```
+contracts → config → core → estimation → {controller, metrics} → components → pipeline
+```
+
+- **contracts** (`EventTable`, `_is_measured`, shape contract, `ProvenanceLog`,
+  `ModelArtifact`) imports nothing else from the package.
+- **core** contains the shared services. Each has exactly one implementation (§IF-06).
+- **estimation** holds the corrected unification (below).
+- **controller** (MHE/MPC) and **metrics** (capability with uncertainty) are used
+  by the simulator and diagnostics.
+- **components** never import each other. The optimizer receives a *simulator
+  factory*, and the pipeline supplies it.
+- **pipeline** is the only layer that wires components together.
+
+`tests/test_architecture.py` resolves every relative import in `src/` and fails
+the build if an import points upward, or if one component imports another.
+
+## The corrected unification (§1.3, REG-01)
+
+The original design used one `EstimationEngine` with a `mode` flag. That put two
+different problems into one class: Component 1 identifies **dynamics** for a
+controller, and Component 6 does **high-dimensional selection** for a
+predictor. They now share only what they really have in common:
+
+```
+                 ┌──────────── SensitivityCore (estimation/sensitivity) ────────────┐
+                 │  centered cross-sectional gain · ridge / SVD-truncated solvers   │
+                 │  noise-floor identifiability report · parameter covariance       │
+                 └───────────────┬──────────────────────────────────┬───────────────┘
+                                 │                                  │
+      estimation/dynamics (C1 only)                 estimation/regularized (C6 only)
+      subspace order · first-order A                PLS · elastic net · group-aware
+      state-space assembly                          stability selection (E12)
+                                 │                                  │
+            components/fb_identification            components/regression_machine
+```
+
+Both still route the noise floor, the counterfactual, data quality and
+validation through the same `core` services. A test checks this through their
+imports: C1 imports `dynamics` but not `regularized`, C6 the reverse, and both
+import `sensitivity`.
+
+## Closed-loop confounding
 
 Passive inline data reflects the controller's corrections, not the open-loop
-process: `u` becomes a function of estimated state, so knobs and disturbances
-are collinear and the covariance is rank-deficient in exactly the directions you
-need. The system:
+process. The system:
 
-1. **quantifies** it — VIF + condition number + numerical-rank deficiency
-   (`foundations/excitation.py`), reported in stakeholder terms by the
-   data-quality layer;
-2. **exploits** accidental excitation — manual overrides and control-off
-   episodes inject "free" variance (`mine_accidental_excitation`), fed to
-   Component 1 and used as validation gold;
-3. **requests** deliberate excitation — the gap is localized to specific
-   adjustable directions and routed to the experiment planner (Component 2).
+1. **quantifies** it with VIF, condition number, and numerical-rank deficiency;
+2. **exploits** accidental excitation (overrides, control-off episodes);
+3. **requests** deliberate excitation by routing adjustable gaps to the planner.
 
-No quantity of passive data resolves the gain-error-vs-estimator-tuning product
-(FB-08); the system records that as a non-holding assumption rather than
-emitting a false attribution.
+Two new places where this confounding comes back are now guarded:
 
-## The two-estimator unification (§1.3, REG-01)
+- **inside experiments (A6/E9).** A closed loop cancels part of a designed
+  perturbation. `PlannerConfig.loop_status` / `rejection_fraction` discount the
+  information credited to each experiment (`experiment_planner/loop_status.py`),
+  and `residual_excitation` measures the surviving fraction after the fact.
+- **inside diagnostics (DIAG-07/E4).** Tight control drives Δu to about 0, so
+  realized gain is undefined. See the precedence tree below.
 
-`foundations/engine.py::EstimationEngine` is **one class with two
-configurations**:
+## Diagnostic precedence (DIAG-07, E4, E5)
 
-- `mode='fb'` (Component 1): structured MIMO gain `M` (`n_out × n_knob`) for the
-  MPC, fused from DOE (wide-range gain) and inline (local correction + noise).
-- `mode='regression'` (Component 6): broad predictor across all sensors,
-  decoupling the controller via the counterfactual, finding feedforward
-  candidates.
+The diagnostics have overlapping signatures. Over-aggressive correction can come
+from an underestimated gain, a hot Controller QR, or an over-trusting State QR.
+They therefore run as a decision tree (`diagnostics/precedence.py`):
 
-Both share: the data model, the data-quality layer, the excitation analysis,
-the noise-floor estimator, the counterfactual service, and the validation
-framework. The confounding and noise-floor logic is therefore literally the same
-code for both — the unification is enforced, not aspirational.
+1. **Excitation gate.** Compute RMS per-event knob move ÷ knob operating spread.
+   Rate-limited loops score 0.25–0.59, actively correcting loops 0.95–2.7, and
+   over-correcting loops 2–4. The floor is 0.75.
+2. **Gain mismatch** runs only if the gate passes. Otherwise it returns
+   *"unidentifiable from available data — excitation required"* and the
+   question is routed to the planner.
+3. **FF leakage** needs no knob movement.
+4. **QR attribution** runs only if the gate passes **and** no gain mismatch was
+   found. With a gain mismatch it is *deferred* (E5).
+5. **Variance decomposition.** Blocked nodes contribute nothing; their share
+   stays "unattributed recoverable".
+6. **Achievability verdict** (Harris).
 
-## Workflow (the simulate → optimize → diagnose loop)
+## Load-bearing assumptions (§1.4)
+
+Every `ModelArtifact` records which assumptions it relies on
+(`contracts/artifact.py::LOAD_BEARING_ASSUMPTIONS`), and each assumption has a
+guard:
+
+- **A1 gain time-invariance.** `gain_drift_monitor` estimates realized gain in
+  half-overlapping windows and regresses its magnitude on time. A strong,
+  consistent trend means re-identify.
+- **A2 `u0` validity.** `estimate_baseline` compares control-off episode
+  baselines over time. A fitted change of more than one knob standard deviation
+  flags drift, gives a re-baseline horizon, and can return an interpolated
+  time-varying `u0`, which `reconstruct` accepts.
+- **A3 `M` accuracy.** In `decouple`, for each FF sensor, the apparent effect
+  `b_j` on the decoupled target is compared with the largest slope an `M` error
+  could create along the knob directions the sensor loads on,
+  `2·rel_unc·‖M_row‖·‖a_j‖`. A sensor whose effect is significant but inside
+  that envelope is **quarantined** instead of reported as a feedforward
+  candidate. Real FF disturbances sit 3–40× outside the envelope in the tests.
+- **A4 delay < horizon.** `route_measurement` sends over-horizon measurements to
+  `SlowBiasEstimator` instead of the Kalman state update.
+- **A5 representative control-off.** `control_off_gold` drops episodes whose
+  tool state is more than 3σ from normal operation.
+- **A6 excitation lands.** See the closed-loop excitation discount above.
+
+## Finite-sample metrics (SIM-06, E10)
+
+Synthetic simulator output is plentiful, but real metrology is sparse. With
+`finite_sample_ci=True`, `metrics.compute_metrics` attaches a large-sample Cpk
+interval (`Var ≈ 1/(9n) + Cpk²/(2(n−1))`) and a block-bootstrap Harris
+interval. Any output below `min_samples` effective points is suppressed and
+reported as "insufficient samples". This is separate from the model-uncertainty
+Monte Carlo bands (SIM-02).
+
+## Workflow
 
 ```
-DOE + inline ── DataQualityLayer ──► EstimationEngine(mode=fb) ──► FBModel(M, uncertainty)
-                       │                                                  │
-                       │ gaps                                             │ M + uncertainty
-                       ▼                                                  ▼
-              ExperimentPlanner ◄──── identifiable-direction report ─── Simulator (on/off arms)
-                                                                          │ metrics + distributions
-                                                                          ▼
-                                                              ControllerOptimizer (outer loop)
-                                                                          │ best config
-                                                                          ▼
-                              counterfactual + noise-floor ──────► DiagnosticsEngine
-                                                                  (variance decomposition,
-                                                                   achievability verdict)
+DOE + inline ─ DataQualityLayer ─► FBIdentifier ─► FBModel / ModelArtifact (M, cov, A, u0, assumptions)
+                     │                                   │
+                     │ gaps                              │ M + uncertainty
+                     ▼                                   ▼
+             ExperimentPlanner ◄── identifiable dirs ─ Simulator(factory) ◄── ControllerOptimizer
+                                                         │
+                                                         ▼
+                                              DiagnosticsEngine (precedence tree)
 
-all data ── EstimationEngine(mode=regression) ──► feedforward candidates, low-variation gaps ──► planner
+all data ─ RegressionMachine ─► FF candidates (phantoms quarantined), low-variation gaps ─► planner
 ```
 
-## Validation strategy
+`pipeline/gates.py::GatePipeline` runs this sequence from one `RunConfig`.
 
-- **Counterfactual** is validated to machine precision on synthetic MIMO data
-  (the disturbance cancels algebraically): `test_counterfactual_exact_on_synthetic_mimo`.
-- **Identification** is validated by gain-recovery error against the known
-  synthetic truth.
-- **Diagnostics** are validated by *injected faults*: a 4× gain underestimate
-  must be diagnosed as over-correction with Harris ≫ 1; a healthy loop must be
-  declared at the floor.
-- **Refusals** are validated as first-class behavior: the MP floor is refused on
-  unbalanced panels, naive k-fold is refused on temporal data, and gain-vs-tuning
-  separation is refused on passive data.
-
-## Open design decisions (§13) — tracked as configuration
-
-These are surfaced as config, not silently defaulted:
+## Open design decisions (§13), kept as configuration
 
 | Decision | Where |
-|----------|-------|
-| Counterfactual baseline `u0` | `FBIdentifier.identify(u0=…)`; defaults to control-off mean with a recorded caveat |
-| Spec inputs (targets, limits) | `Simulator(targets, lsl, usl)` |
-| `M` uncertainty for MC bands | `FBModel.relative_uncertainty()` → `Simulator(rel_uncertainty_M=…)` |
-| Planner objective D vs I, `p(x)`, loop status, budget | `PlannerConfig` |
-| Regression target raw vs innovation | `RegressionMachine.fit(target_kind=…)` |
-| Noise-floor default per dataset | `noise_floor.estimate` chooses analytic/empirical and records why |
+|---|---|
+| `u0` baseline and time-varying option | `RunConfig.allow_time_varying_u0`, `FBIdentifier.identify(u0=…)` |
+| Spec inputs + minimum-sample floor | `RunConfig.targets/lsl/usl/min_samples` |
+| `M` uncertainty | `RunConfig.rel_uncertainty_M` (MC bands and phantom-FF envelope) |
+| Planner objective, loop status, budget, integer dims | `RunConfig` → `PlannerConfig` |
+| Regression target raw vs innovation | `RunConfig.regression_target` |
+| Noise-floor choice | `noise_floor.estimate` picks analytic or empirical and records why |
