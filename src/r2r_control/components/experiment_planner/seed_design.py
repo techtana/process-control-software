@@ -24,14 +24,24 @@ def design_score(Xm: np.ndarray, Mref: np.ndarray, objective: str) -> float:
 
 def seed_design(n_factors: int, objective: str, model_form: str, n_runs: int,
                 level_low: float, level_high: float, candidate_pool: int,
-                rng: np.random.Generator, integer_dims=None) -> np.ndarray:
-    """D- or I-optimal seed design via coordinate exchange (EP-03)."""
+                rng: np.random.Generator, integer_dims=None, space=None) -> np.ndarray:
+    """D- or I-optimal seed design via coordinate exchange (EP-03).
+
+    With a ``CodedSpace`` the candidate pool is made feasible by its snapping
+    rules (E11) and the I-criterion averages over its p(x) reference (EP-08).
+    """
     from ...core.gp import round_to_feasible
-    pool = rng.uniform(level_low, level_high, size=(candidate_pool, n_factors))
-    if integer_dims:
-        pool = round_to_feasible(pool, integer_dims=integer_dims)   # E11
+    if space is not None:
+        pool = space.sample(rng, candidate_pool)
+        ref = space.reference(rng, 200)
+    else:
+        pool = rng.uniform(level_low, level_high, size=(candidate_pool, n_factors))
+        if integer_dims:
+            pool = round_to_feasible(pool, integer_dims=integer_dims)   # E11
+        ref = rng.uniform(level_low, level_high, size=(200, n_factors))
+    n_runs = min(n_runs, len(pool))
     design = pool[rng.choice(len(pool), size=n_runs, replace=False)].copy()
-    Mref = model_matrix(rng.uniform(level_low, level_high, size=(200, n_factors)), model_form)
+    Mref = model_matrix(ref, model_form)
     for _ in range(5):
         improved = False
         for i in range(n_runs):

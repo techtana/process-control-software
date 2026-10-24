@@ -18,7 +18,10 @@ from typing import List, Optional
 import numpy as np
 
 from ...contracts.provenance import ProvenanceLog
+from ...contracts.artifact import variance_rel_uncertainty
 from ...core import noise_floor as nf
+from ...core.noise_floor.cleaning import eigenvalue_clip, ledoit_peche_shrinkage
+from ...core.noise_floor.analytic import marchenko_pastur_edge
 from ...core.excitation.spectrum import regressor_spectrum
 from ...core.excitation.directions import unidentifiable_directions
 from ...core.excitation.vif import vif
@@ -36,6 +39,71 @@ def ridge_fit(X: np.ndarray, Y: np.ndarray, lam: float):
     dof = max(n - np.trace(X @ A_inv @ X.T), 1.0)
     sigma2 = np.sum(resid ** 2, axis=0) / dof
     return B, A_inv @ XtX @ A_inv, sigma2
+
+
+def clean_gram(X: np.ndarray, method: str, alpha: Optional[float] = None) -> np.ndarray:
+    """Eigenvalue-cleaned ``X'X`` for a stabilized solve (NF-05).
+
+    ``"clip"`` raises eigenvalues of the covariance below the MP lower bulk edge
+    (times the mean eigenvalue) to that edge; ``"ledoit_peche"`` applies the
+    nonlinear shrinkage, or linear shrinkage of strength ``alpha`` when given.
+    Both analytic forms assume a balanced panel.
+    """
+    X = np.asarray(X, dtype=float)
+    n, p = X.shape
+    C = (X.T @ X) / max(n, 1)
+    q = p / max(n, 1)
+    if method == "clip":
+        lower, _ = marchenko_pastur_edge(min(q, 1.0))
+        floor = lower * float(np.mean(np.linalg.eigvalsh(C)))
+        Cc = eigenvalue_clip(C, max(floor, 1e-12))
+    elif method == "ledoit_peche":
+        Cc = ledoit_peche_shrinkage(C, q, alpha=alpha)
+    else:
+        raise ValueError(f"unknown covariance cleaning {method!r}")
+    return Cc * n
+
+
+def cleaned_ridge_fit(X: np.ndarray, Y: np.ndarray, lam: float, method: str,
+                      alpha: Optional[float] = None):
+    """Ridge on an eigenvalue-cleaned Gram matrix (NF-05); returns (B, cov, sigma2)."""
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    n, p = X.shape
+    G = clean_gram(X, method, alpha)
+    A_inv = np.linalg.inv(G + lam * np.eye(p))
+    B = A_inv @ X.T @ Y
+    resid = Y - X @ B
+    dof = max(n - np.trace(X @ A_inv @ X.T), 1.0)
+    sigma2 = np.sum(resid ** 2, axis=0) / dof
+    return B, A_inv @ (X.T @ X) @ A_inv, sigma2
+
+
+def select_cleaning_alpha(X: np.ndarray, Y: np.ndarray, lam: float,
+                          alphas=(0.0, 0.1, 0.25, 0.5, 0.75), n_splits: int = 4) -> float:
+    """Cross-validated linear-shrinkage strength (NF-05: preferred on unbalanced panels).
+
+    Forward-chaining folds over the row order; returns the alpha with the lowest
+    mean out-of-fold squared error.
+    """
+    from ...core.validation.forward_chaining import forward_chaining_splits
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float).reshape(len(X), -1)
+    splits = forward_chaining_splits(len(X), n_splits=n_splits)
+    best, best_err = alphas[0], np.inf
+    for a in alphas:
+        errs = []
+        for sp in splits:
+            Xtr, Ytr = X[sp.train_idx], Y[sp.train_idx]
+            if len(Xtr) <= X.shape[1]:
+                continue
+            mu_x, mu_y = Xtr.mean(0), Ytr.mean(0)
+            B, _, _ = cleaned_ridge_fit(Xtr - mu_x, Ytr - mu_y, lam, "ledoit_peche", alpha=a)
+            pred = (X[sp.test_idx] - mu_x) @ B + mu_y
+            errs.append(float(np.mean((Y[sp.test_idx] - pred) ** 2)))
+        if errs and np.mean(errs) < best_err:
+            best, best_err = a, float(np.mean(errs))
+    return float(best)
 
 
 def svd_truncated_fit(X: np.ndarray, Y: np.ndarray, rank: int):
@@ -97,8 +165,8 @@ class FittedSensitivity:
         return np.asarray(X, dtype=float) @ self.coef + self.intercept
 
     def relative_uncertainty(self) -> float:
-        scale = np.linalg.norm(self.coef) + 1e-12
-        return float(np.sqrt(np.trace(self.param_cov) * np.mean(self.sigma2)) / scale)
+        """Relative Frobenius error expected from estimation variance (KI-2)."""
+        return variance_rel_uncertainty(self.param_cov, self.sigma2, self.coef)
 
 
 class SensitivityCore:
@@ -107,10 +175,14 @@ class SensitivityCore:
     def __init__(self, estimator: str = "ridge", ridge_lambda: float = 1.0,
                  rank_rtol: float = 1e-2, order_by_noise_floor: bool = True,
                  noise_floor_perm: int = 200, noise_floor_quantile: float = 0.99,
-                 seed: int = 0):
+                 covariance_cleaning: Optional[str] = None, seed: int = 0):
         if estimator not in ("ridge", "svd"):
             raise ValueError(f"SensitivityCore supports 'ridge'|'svd', got {estimator!r} "
                              f"(PLS/elastic-net live in the Component-6 regularized layer)")
+        if covariance_cleaning not in (None, "clip", "ledoit_peche", "cv"):
+            raise ValueError(f"covariance_cleaning must be None|'clip'|'ledoit_peche'|'cv', "
+                             f"got {covariance_cleaning!r}")
+        self.covariance_cleaning = covariance_cleaning
         self.estimator = estimator
         self.ridge_lambda = ridge_lambda
         self.rank_rtol = rank_rtol
@@ -158,9 +230,25 @@ class SensitivityCore:
         prov.note(f"retained model order = {rank} (effective rank above noise floor)")
 
         extras = {}
-        if self.estimator == "ridge":
+        if self.estimator == "ridge" and self.covariance_cleaning:
+            if self.covariance_cleaning == "cv":
+                alpha = select_cleaning_alpha(Xc, Yc, self.ridge_lambda)
+                B, cov, sigma2 = cleaned_ridge_fit(Xc, Yc, self.ridge_lambda, "ledoit_peche",
+                                                   alpha=alpha)
+                extras["cleaning_alpha"] = alpha
+                prov.note(f"covariance cleaning: linear shrinkage, strength {alpha:.2f} chosen "
+                          f"by forward validation (NF-05)")
+            else:
+                B, cov, sigma2 = cleaned_ridge_fit(Xc, Yc, self.ridge_lambda,
+                                                   self.covariance_cleaning)
+                prov.note(f"covariance cleaning: {self.covariance_cleaning} (analytic; derived "
+                          f"under the balanced-panel assumption, prefer 'cv' otherwise, NF-05)")
+        elif self.estimator == "ridge":
             B, cov, sigma2 = ridge_fit(Xc, Yc, self.ridge_lambda)
         else:
+            if self.covariance_cleaning:
+                prov.note("covariance cleaning ignored: SVD truncation already clips the "
+                          "spectrum (NF-05)")
             B, cov, sigma2, s = svd_truncated_fit(Xc, Yc, rank)
             extras["singular_values"] = s
         prov.note(f"sensitivity core fit ({self.estimator}); order={rank}; "

@@ -14,4 +14,4 @@ from . import synthetic
 
 __all__ = ["contracts", "config", "core", "estimation", "controller", "metrics",
            "components", "pipeline", "synthetic"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

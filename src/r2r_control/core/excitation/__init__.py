@@ -4,9 +4,11 @@ from .vif import vif
 from .spectrum import SpectrumReport, regressor_spectrum, numerical_rank
 from .directions import UnidentifiableDirection, unidentifiable_directions
 from .accidental import AccidentalExcitation, mine_accidental_excitation, runs
+from .feedback import FeedbackTest, feedback_test
 
 __all__ = [
     "vif", "SpectrumReport", "regressor_spectrum", "numerical_rank",
     "UnidentifiableDirection", "unidentifiable_directions",
     "AccidentalExcitation", "mine_accidental_excitation", "runs",
+    "FeedbackTest", "feedback_test",
 ]

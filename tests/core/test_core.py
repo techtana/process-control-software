@@ -205,3 +205,34 @@ def test_round_to_feasible_and_mixed_kernel():
     K = mixed_kernel(np.array([[0.0, 1.0], [0.0, 2.0]]), np.array([[0.0, 1.0]]), 1.0, 1.0,
                      categorical_dims=[1])
     assert K[0, 0] == pytest.approx(1.0) and K[1, 0] == 0.0
+
+
+# ---- closure fixes: VAL-03 embargo, KI-8 statistics ------------------------
+def test_embargo_drops_training_rows_after_the_test_block():
+    from r2r_control.core.validation.forward_chaining import forward_chaining_splits
+    plain = forward_chaining_splits(200, n_splits=4, purge=1)
+    emb = forward_chaining_splits(200, n_splits=4, purge=1, embargo=5)
+    assert len(plain) == len(emb)
+    for a, b in zip(plain, emb):
+        assert set(b.train_idx) <= set(a.train_idx)
+        assert b.train_idx.max() < b.test_idx.min()
+
+
+def test_effective_sample_size_discounts_autocorrelation(rng):
+    x = np.zeros(400)
+    for i in range(1, 400):
+        x[i] = 0.7 * x[i - 1] + rng.standard_normal()
+    assert stats.effective_sample_size(rng.standard_normal(400)) > 300
+    assert stats.effective_sample_size(x) < 120     # ≈ n(1-ρ)/(1+ρ) = 71
+    from r2r_control.metrics import compute_metrics
+    Y = x[:, None]
+    m = compute_metrics(Y, np.zeros(1), -np.full(1, 6.0), np.full(1, 6.0),
+                        n_effective=np.array([400]), finite_sample_ci=True, rng=rng)
+    assert m.n_effective[0] < 120
+
+
+def test_adf_uses_finite_sample_critical_values_and_pvalue():
+    small, large = stats.adf_critical_values(50), stats.adf_critical_values(10 ** 6)
+    assert small["5%"] < large["5%"]                # stricter in small samples
+    assert abs(large["5%"] + 2.86) < 0.01
+    assert stats.adf_pvalue(-3.5) < 0.01 < 0.2 < stats.adf_pvalue(-2.0)

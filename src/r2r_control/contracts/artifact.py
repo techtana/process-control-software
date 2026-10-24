@@ -29,6 +29,26 @@ LOAD_BEARING_ASSUMPTIONS = {
 }
 
 
+def expected_frobenius_error2(param_cov: np.ndarray, sigma2: np.ndarray) -> float:
+    """``E||B_hat - B||_F^2 = trace(cov) * sum_j sigma2_j`` for a multi-output linear fit."""
+    return float(np.trace(np.asarray(param_cov, dtype=float)) *
+                 np.sum(np.asarray(sigma2, dtype=float)))
+
+
+def variance_rel_uncertainty(param_cov: Optional[np.ndarray], sigma2: Optional[np.ndarray],
+                             coef: np.ndarray) -> float:
+    """Relative Frobenius error expected from estimation variance alone (KI-2).
+
+    Same scale as the simulator's multiplicative ``rel_uncertainty_M``
+    (``E||M*(1+r*N)-M||_F = r*||M||_F``). Summing ``sigma2`` over outputs, not
+    averaging it, is what makes the two comparable.
+    """
+    if param_cov is None or sigma2 is None:
+        return float("nan")
+    return float(np.sqrt(expected_frobenius_error2(param_cov, sigma2)) /
+                 (np.linalg.norm(coef) + 1e-12))
+
+
 @dataclass
 class ModelArtifact:
     """A published model + everything needed to audit and consume it (IF-01)."""
@@ -42,14 +62,14 @@ class ModelArtifact:
     feature_names: List[str] = field(default_factory=list)
     output_names: List[str] = field(default_factory=list)
     assumptions_relied_on: List[str] = field(default_factory=list)
+    bias_rel_uncertainty: float = 0.0
     extras: Dict[str, Any] = field(default_factory=dict)
 
     def relative_uncertainty(self) -> float:
-        """Scalar relative-uncertainty estimate on the coefficient map (CF-03/SIM-02)."""
-        if self.param_cov is None or self.sigma2 is None:
-            return float("nan")
-        scale = np.linalg.norm(self.coef) + 1e-12
-        return float(np.sqrt(np.trace(self.param_cov) * np.mean(self.sigma2)) / scale)
+        """Relative uncertainty on the coefficient map: variance and bias in quadrature
+        (CF-03/SIM-02, KI-2)."""
+        var = variance_rel_uncertainty(self.param_cov, self.sigma2, self.coef)
+        return float(np.hypot(var, self.bias_rel_uncertainty))
 
     def assumption_ledger(self) -> Dict[str, str]:
         return {a: LOAD_BEARING_ASSUMPTIONS[a] for a in self.assumptions_relied_on
@@ -60,6 +80,7 @@ class ModelArtifact:
             "kind": self.kind,
             "coef_shape": list(np.asarray(self.coef).shape),
             "relative_uncertainty": self.relative_uncertainty(),
+            "bias_rel_uncertainty": self.bias_rel_uncertainty,
             "identifiable": self.identifiable.to_dict()
             if hasattr(self.identifiable, "to_dict") else self.identifiable,
             "assumptions_relied_on": self.assumption_ledger(),

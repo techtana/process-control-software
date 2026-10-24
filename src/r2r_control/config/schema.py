@@ -24,8 +24,10 @@ class RunConfig:
     usl: Optional[List[float]] = None
     min_samples: int = 8
 
-    # §13.4 M uncertainty for MC bands / phantom-FF guard (CF-03, SIM-02, A3)
-    rel_uncertainty_M: float = 0.1
+    # §13.4 M uncertainty for MC bands / phantom-FF guard (CF-03, SIM-02, A3).
+    # None (default) uses the uncertainty identified by Component 1, including its
+    # bias term (KI-2). A number is a human override and is logged as such.
+    rel_uncertainty_M: Optional[float] = None
 
     # §13.6 experiment-planner choices (EP-08, A6, E11)
     planner_objective: str = "D"                    # 'D' | 'I'

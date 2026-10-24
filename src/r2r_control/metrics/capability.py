@@ -15,6 +15,7 @@ import numpy as np
 from scipy.stats import norm
 
 from ..core.noise_floor.analytic import harris_index
+from ..core.stats import effective_sample_size
 from .harris import harris_with_ci
 from .min_samples import min_sample_gate, INSUFFICIENT
 
@@ -23,8 +24,11 @@ def cpk_point(mean: float, std: float, lsl: float, usl: float) -> float:
     return min(usl - mean, mean - lsl) / (3.0 * max(std, 1e-12))
 
 
-def cpk_confidence_interval(cpk: float, n: int, alpha: float = 0.05):
-    """Large-sample CI for Cpk: Var(Cpk_hat) ~ 1/(9n) + Cpk^2 / (2(n-1))."""
+def cpk_confidence_interval(cpk: float, n: float, alpha: float = 0.05):
+    """Large-sample CI for Cpk: Var(Cpk_hat) ~ 1/(9n) + Cpk^2 / (2(n-1)).
+
+    ``n`` should be the autocorrelation-adjusted effective sample size.
+    """
     if n < 2 or not np.isfinite(cpk):
         return float("nan"), float("nan")
     se = np.sqrt(1.0 / (9.0 * n) + cpk ** 2 / (2.0 * (n - 1)))
@@ -73,6 +77,11 @@ def compute_metrics(y: np.ndarray, targets: np.ndarray, lsl: np.ndarray, usl: np
     With ``finite_sample_ci`` (real sparse data) per-output Cpk/Harris intervals
     are attached and, given ``min_samples``, under-powered outputs are suppressed
     (E10). Without it (abundant simulated output) the gate is inactive.
+
+    The sample size behind the Cpk interval and the gate is discounted for
+    autocorrelation (KI-8): ``n_eff = n_measured · ESS(y)/len(y)``, where
+    ``n_measured`` is ``n_effective`` if given (the ``_is_measured`` count) and
+    the number of finite values otherwise. ``Metrics.n_effective`` reports it.
     """
     y = np.asarray(y, dtype=float)
     n_out = y.shape[1]
@@ -84,10 +93,16 @@ def compute_metrics(y: np.ndarray, targets: np.ndarray, lsl: np.ndarray, usl: np
     cpk_ci = np.full((n_out, 2), np.nan)
     harris_ci = np.full((n_out, 2), np.nan)
     suppressed = np.zeros(n_out, dtype=bool)
+    n_eff_used = np.zeros(n_out)
     for j in range(n_out):
         col = y[:, j]
         col = col[np.isfinite(col)]
-        n_eff = int(n_effective[j]) if n_effective is not None else len(col)
+        n_meas = int(n_effective[j]) if n_effective is not None else len(col)
+        if finite_sample_ci and len(col) >= 4:
+            n_eff = n_meas * effective_sample_size(col) / len(col)
+        else:
+            n_eff = float(n_meas)
+        n_eff_used[j] = n_eff
         cpk[j] = cpk_point(mean[j], std[j], lsl[j], usl[j])
         pct_oos[j] = 100.0 * np.mean((col < lsl[j]) | (col > usl[j])) if len(col) else np.nan
         if finite_sample_ci:
@@ -105,4 +120,4 @@ def compute_metrics(y: np.ndarray, targets: np.ndarray, lsl: np.ndarray, usl: np
                    cpk_ci=cpk_ci if finite_sample_ci else None,
                    harris_ci=harris_ci if finite_sample_ci else None,
                    suppressed=suppressed if finite_sample_ci else None,
-                   n_effective=n_effective)
+                   n_effective=n_eff_used if finite_sample_ci else n_effective)

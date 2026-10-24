@@ -22,29 +22,42 @@ they do not.
 
 ## Project status: closed (October 2026)
 
-Version 0.2.0 is the final release. It is an offline decision-support library
+Version 0.3.0 is the final release. It is an offline decision-support library
 validated on **synthetic data only**. Read
 [`docs/project-closure.md`](docs/project-closure.md) before using any output on
 real process data. That report covers the assumptions, applicability,
-methodology, limitations, known issues and future work. The most important
-known issues are:
+methodology, limitations, known issues and future work.
 
-- Fusing closed-loop inline data with the DOE **biases the gain estimate**
-  (10–31% error, against 2–5% from the DOE alone).
-- The reported gain uncertainty is **2.4–4.8× too small**.
-- The simulator **does not delay measurements**.
+The 0.2.0 closure review found nine known issues. 0.3.0 fixes KI-1 to KI-8 and
+part of KI-9; the report gives the evidence before and after each fix:
+
+- **Closed-loop bias in the gain (KI-1).** Closed-loop inline rows are now
+  detected by a feedback test and excluded from gain identification. The fused
+  gain error equals the DOE-only error (2–5%); before, it was 10–31%.
+- **Gain uncertainty (KI-2).** The reported uncertainty now includes a bias term
+  and is propagated downstream. The actual error is 0.6–1.4× the reported value;
+  before, it was 2.4–4.8×.
+- **Simulated metrology delay (KI-3).** Measurements now arrive late, and
+  control degrades with delay as it should.
+
+What remains:
+
+- Validation is on synthetic data only.
+- The control-off gold holdout lowers FF-selection power on some data.
+- A gain error and an FF-model error can be inseparable from passive data.
+- The revised specification is not in the repository.
 
 ## Install
 
 ```bash
 pip install -e .            # core (numpy, pandas, scipy)
 pip install -e ".[test]"    # + pytest, matplotlib
-pytest                      # 64 tests, incl. injected-fault and refusal tests
+pytest                      # 90 tests, incl. injected-fault and refusal tests
 python examples/walkthrough.py
 ```
 
 Verified at closure on Python 3.11 with numpy 2.4, pandas 3.1 and scipy 1.17:
-64 passed, no warnings.
+90 passed in about 19 s, no warnings.
 
 ## Repository layout (§16)
 
@@ -65,7 +78,8 @@ src/r2r_control/
 │   ├── sensitivity/    SensitivityCore — shared by Components 1 and 6
 │   ├── dynamics/       Component 1 only: order selection, state space
 │   └── regularized/    Component 6 only: PLS, elastic net, group stability selection
-├── controller/    mhe (+ out-of-sequence routing, A4) · mpc (+ move limits)
+├── controller/    mhe (+ late-measurement replay / routing, A4) · mpc (receding
+│                  horizon, exact move limits, absolute bounds)
 ├── metrics/       Cpk/Harris with finite-sample CIs + minimum-sample gate (E10)
 ├── components/    fb_identification · experiment_planner · simulator ·
 │                  controller_optimizer · diagnostics · regression_machine
@@ -116,14 +130,15 @@ Each component can also be used on its own; see
 |---|---|---|
 | A1 gain is time-invariant | realized-gain drift monitor | `diagnostics/gain_mismatch.py::gain_drift_monitor` |
 | A2 `u0` valid over the horizon | control-off baseline drift check, validity horizon, optional time-varying `u0` | `core/counterfactual/baseline.py` |
-| A3 `M` accurate enough to decouple | M-uncertainty propagation + phantom-FF quarantine | `regression_machine/decouple.py` |
-| A4 metrology delay < MHE horizon | late measurements routed to a slow-bias estimator | `controller/mhe/oosm.py` |
-| A5 control-off episodes are representative | tool-state check excludes anomalous episodes from gold | `core/validation/control_off.py` |
-| A6 injected excitation lands | closed-loop excitation discount on information gain | `experiment_planner/loop_status.py` |
+| A3 `M` accurate enough to decouple | identified M-uncertainty propagation + phantom-FF quarantine | `regression_machine/decouple.py` |
+| A4 metrology delay < MHE horizon | delayed measurements folded in within the horizon, older ones routed to a slow-bias estimator | `components/simulator/run.py`, `controller/mhe/` |
+| A5 control-off episodes are representative | tool-state check excludes anomalous episodes from the C6 gold holdout | `core/validation/control_off.py` |
+| A6 injected excitation lands | closed-loop excitation discount on information gain, calibratable from measured residual excitation | `experiment_planner/loop_status.py` |
+| M3 gain rows are exogenous | feedback test excludes closed-loop inline rows from gain identification | `core/excitation/feedback.py` |
 
 Each guard has blind spots, and further modelling assumptions (linear gain,
-superposition, exogenous identification data, run-to-run settling) have no guard
-at all. See sections 5.1 and 5.2 of the closure report.
+superposition, run-to-run settling) have no guard at all. See sections 5.1 and
+5.2 of the closure report.
 
 ## Honesty over convenience (NFR-06)
 
@@ -134,7 +149,11 @@ each one:
   **never uses a plain shuffle**, which would erase autocorrelation and push
   the floor too low (NF-03/E6).
 - It **refuses to separate gain error from estimator tuning** using passive
-  closed-loop data (FB-08).
+  closed-loop data (FB-08). When the controller's prediction `y_pred` is
+  logged, the §13.5 diagnostic separates an inaccurate gain from tracking lag,
+  and reports when a gain error and an FF-model error cannot be told apart.
+- It **excludes closed-loop inline rows from gain identification**. Without a
+  DOE it flags the closed-loop fallback with a 100% bias floor (DQ-06).
 - Under tight control, gain and QR diagnoses come back as **"unidentifiable from
   available data — excitation required"** and are routed to the planner, not
   guessed (DIAG-07/E4). QR attribution waits until any gain mismatch is resolved (E5).

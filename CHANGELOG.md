@@ -1,8 +1,83 @@
 # Changelog
 
-## Project closure — 2026-10-24 (documentation only)
+## 0.3.0 — Fixes for the closure known issues (2026-10-24)
 
-No algorithm or behavior changes; the package version stays 0.2.0.
+Resolves KI-1 to KI-8 and part of KI-9 from the 0.2.0 closure review.
+`docs/project-closure.md` §8 gives the evidence before and after each fix.
+90 tests pass (64 in 0.2.0).
+
+### Behavior changes
+- **Gain identification excludes closed-loop inline rows (KI-1, DQ-06).**
+  - A new feedback test (`core/excitation/feedback.py`) asks whether the history
+    of measured outputs predicts the knob settings. If it does, the inline
+    report sets `gain_usable = False`.
+  - `FBIdentifier` builds the gain from the DOE plus open-loop inline rows only.
+  - Without a DOE, the closed-loop fit is flagged with a 100% bias floor and
+    every knob is low-confidence.
+  - `down_weight` verdicts now carry weight 0.5.
+  - FB test tolerances were tightened from 30–35% to 10%.
+- **Gain uncertainty includes bias and is propagated (KI-2).**
+  - `relative_uncertainty = hypot(variance, bias)`. The variance term is now
+    summed over outputs.
+  - `RunConfig.rel_uncertainty_M` defaults to `None`, meaning "use the
+    identified value". An override below it logs a warning.
+- **Simulator (KI-3, KI-4).**
+  - Measurements are released `metrology_delay` steps late. Late measurements
+    within `mhe_horizon` are folded in by replaying the Kalman time updates.
+  - `MPCController` is a receding-horizon MPC over the predicted disturbance
+    trajectory. Move limits are enforced exactly (bounded least squares) and
+    optional `u_lower`/`u_upper` bounds by SLSQP.
+  - `y_pred` is recorded.
+  - Harris delay = metrology delay + 1.
+  - `_run_once` now returns 7 values.
+- **Pipeline (KI-5).**
+  - The simulator uses C1's `A`, FF gains (new: ridge on the counterfactual)
+    and identified uncertainty.
+  - The disturbance stability clip triggers at |λ| ≥ 1 (was 1.5).
+  - Low-confidence knobs are passed to the planner.
+- **Planner (KI-6, E11, A6).**
+  - Signed gap directions, plus `target_features`; the acquisition is boosted
+    toward the gap (`gap_weight`).
+  - GP hyperparameters are fitted by marginal likelihood when responses exist.
+  - `CodedSpace` handles engineering units (`knob_bounds`), integer and
+    categorical levels (`mixed_kernel`), and `px_weighting`.
+  - New cost model; proposals record their purpose.
+  - `calibrate_rejection` sets the closed-loop rejection fraction from measured
+    residual excitation.
+  - `plan()` accepts existing experiments and responses.
+- **Regression machine (KI-7).**
+  - Control-off episodes are held out as gold by default (VAL-04).
+  - `embargo` is configurable (VAL-03).
+  - Trace columns are aggregated, with a held-out raw-retention check (REG-09).
+  - **Note:** the gold holdout can lower FF-selection frequency where
+    control-off episodes are the main FF-independent excitation (closure report
+    R-1).
+- **Covariance cleaning (NF-05).** `covariance_cleaning = "clip" |
+  "ledoit_peche" | "cv"` on the ridge path. It is opt-in.
+- **Statistics (KI-8).**
+  - The Cpk interval uses an autocorrelation-discounted `n_eff`
+    (`Metrics.n_effective`).
+  - ADF uses finite-sample critical values and a p-value.
+  - FF leakage applies Šidák across outputs and Holm across inputs.
+- **§13.5 model consistency (KI-9).**
+  - `EventTable.y_pred_cols` stores the controller's prediction.
+  - `model_consistency` (diagnostics node 2b) returns `M_inaccurate`,
+    `M_or_FF_model_error`, `FF_model_error`, `fb_tracking_lag` or `consistent`.
+  - The synthetic generator emits `<y>_pred` columns and takes an
+    `estimator_gain` parameter.
+
+### Not fixed
+- The revised specification is still not in the repository (KI-9).
+- `subspace_order` is still used only in tests.
+
+### Other
+- The test suite takes about 19 s, up from 8 s, mainly the constrained MPC.
+- Docs: closure report, README, architecture and traceability updated for
+  0.3.0.
+
+## Project closure review — 2026-10-24 (documentation, on 0.2.0)
+
+No algorithm or behavior changes in this entry; the fixes followed in 0.3.0.
 
 - Added `docs/project-closure.md`. It covers the assumptions (guarded and
   unguarded), applicability, methodology, limitations, nine known issues with

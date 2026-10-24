@@ -25,13 +25,16 @@ class DataQualityLayer:
     def __init__(self, staleness_horizon_days: float = 180.0,
                  covariate_shift_reject: float = 3.0,
                  covariate_shift_downweight: float = 1.0, vif_warn: float = 10.0,
-                 min_effective_samples: int = 8,
+                 min_effective_samples: int = 8, inline_downweight: float = 0.5,
+                 feedback_alpha: float = 0.01,
                  provenance: Optional[ProvenanceLog] = None):
         self.staleness_horizon_days = staleness_horizon_days
         self.covariate_shift_reject = covariate_shift_reject
         self.covariate_shift_downweight = covariate_shift_downweight
         self.vif_warn = vif_warn
         self.min_effective_samples = min_effective_samples
+        self.inline_downweight = inline_downweight
+        self.feedback_alpha = feedback_alpha
         self.provenance = provenance or ProvenanceLog()
 
     def assess_doe(self, design: np.ndarray, factor_names: List[str], age_days: float,
@@ -44,7 +47,9 @@ class DataQualityLayer:
 
     def assess_inline(self, table: EventTable) -> QualityReport:
         return assess_inline(table, self.provenance, vif_warn=self.vif_warn,
-                             min_effective_samples=self.min_effective_samples)
+                             min_effective_samples=self.min_effective_samples,
+                             downweight=self.inline_downweight,
+                             feedback_alpha=self.feedback_alpha)
 
     def combine(self, doe: QualityReport, inline: QualityReport) -> Dict:
         return combine(doe, inline, self.provenance)

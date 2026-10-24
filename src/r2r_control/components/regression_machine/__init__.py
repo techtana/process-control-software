@@ -24,6 +24,8 @@ from ...estimation.regularized.stability_selection import stability_selection, S
 from .decouple import decouple
 from .target import innovation_target
 from .select import low_variation, feedforward_candidates
+from .traces import trace_features, resample_traces, raw_retention_check
+from ...core.validation.control_off import control_off_gold
 
 
 @dataclass
@@ -41,6 +43,8 @@ class RegressionResult:
     decoupled: bool
     provenance: ProvenanceLog
     notes: List[str] = field(default_factory=list)
+    gold: Dict = field(default_factory=dict)          # VAL-04 control-off holdout
+    traces: Dict = field(default_factory=dict)        # REG-09 representation decisions
 
     def to_dict(self):
         d = dict(self.__dict__)
@@ -70,12 +74,18 @@ class RegressionMachine:
 
     def __init__(self, candidate_estimators: Optional[List[str]] = None,
                  low_variation_quantile: float = 0.05, n_stability_resamples: int = 100,
-                 block_size: int = 10, selection_threshold: float = 0.6, seed: int = 0):
+                 block_size: int = 10, selection_threshold: float = 0.6,
+                 purge: int = 1, embargo: int = 0, gold_holdout: bool = True,
+                 trace_substeps: int = 1, seed: int = 0):
         self.candidate_estimators = candidate_estimators or ["ridge", "pls", "elastic_net"]
         self.low_variation_quantile = low_variation_quantile
         self.n_stability_resamples = n_stability_resamples
         self.block_size = block_size
         self.selection_threshold = selection_threshold
+        self.purge = purge                  # VAL-03 gap between train and test folds
+        self.embargo = embargo              # VAL-03 train points dropped around test folds
+        self.gold_holdout = gold_holdout    # VAL-04 control-off episodes held out as gold
+        self.trace_substeps = trace_substeps
         self.seed = seed
 
     def fit(self, table: EventTable, target_output: str, M: Optional[np.ndarray] = None,
@@ -83,15 +93,29 @@ class RegressionMachine:
             target_kind: str = "raw", adjustable_features: Optional[List[str]] = None,
             control_model_error_known: bool = True,
             innovation_series: Optional[np.ndarray] = None,
-            rel_uncertainty_M: float = 0.0) -> RegressionResult:
+            rel_uncertainty_M: float = 0.0,
+            tool_state_cols: Optional[List[str]] = None) -> RegressionResult:
         prov = ProvenanceLog(seed=self.seed)
         prov.config["component"] = "6-regression"
         rng = np.random.default_rng(self.seed)
         notes: List[str] = []
-        feat_names = table.regressor_names
+        feat_names = list(table.regressor_names)
         X = table.regressors()
         j_out = table.y_cols.index(target_output)
         Yall = table.y_matrix()
+
+        # ---- traces: aggregated features by default (REG-09) ----------
+        trace_info: Dict = {}
+        trace_parts = []
+        for col in table.trace_cols:
+            cells = table.frame[col].to_list()
+            F, names = trace_features(cells, col, self.trace_substeps)
+            trace_parts.append((col, cells, F, names))
+            X = np.column_stack([X, F])
+            feat_names += names
+        if trace_parts:
+            prov.note(f"traces {table.trace_cols} aggregated per substep "
+                      f"(substeps={self.trace_substeps}) before fitting (REG-09)")
 
         # ---- target + controller decoupling (REG-02/04, A3/E2) ---------
         quarantined: List[str] = []
@@ -116,8 +140,34 @@ class RegressionMachine:
         else:
             Y = innovation_target(Yall[:, j_out], innovation_series, prov)
 
+        # ---- raw-trace retention check, now that the target is known (REG-09)
+        for col, cells, F, names in trace_parts:
+            raw = resample_traces(cells)
+            chk = raw_retention_check(raw, F, Y)
+            trace_info[col] = chk
+            prov.note(f"trace {col}: {chk['detail']} (held-out |r| raw="
+                      f"{chk['raw_corr']:.2f}, best aggregate={chk['agg_corr']:.2f})")
+            if chk["retain_raw"]:
+                X = np.column_stack([X, raw])
+                feat_names += [f"{col}_raw{i}" for i in range(raw.shape[1])]
+
         measured = table.measured_mask(target_output) & np.isfinite(Y)
-        Xm, Ym = X[measured], Y[measured]
+        measured &= np.all(np.isfinite(X), axis=1)
+
+        # ---- control-off gold holdout, disjoint from fitting (VAL-04, A5) --
+        gold_mask = np.zeros(len(Y), dtype=bool)
+        gold_rep = None
+        if self.gold_holdout and table.control_off_mask().any():
+            ts = (table.frame[tool_state_cols].to_numpy(dtype=float)
+                  if tool_state_cols else None)
+            gold_rep = control_off_gold(table.control_off_mask(), tool_state=ts)
+            gold_mask[gold_rep.gold_idx] = True
+            prov.note(f"control-off gold holdout: {gold_rep.n_gold_episodes} episode(s), "
+                      f"{int((gold_mask & measured).sum())} measured events set aside; "
+                      f"{len(gold_rep.excluded_episodes)} excluded as unrepresentative "
+                      f"(VAL-04, A5)")
+        fit_rows = measured & ~gold_mask
+        Xm, Ym = X[fit_rows], Y[fit_rows]
         if len(Ym) < 8:
             prov.note("too few measured events for honest validation")
 
@@ -142,6 +192,18 @@ class RegressionMachine:
         prov.note(f"feedforward candidates: {ff_cands}"
                   + (f"; quarantined (phantom FF, A3/E2): {quarantined}" if quarantined else ""))
 
+        # ---- gold evaluation of the selected estimator (VAL-04) --------
+        gold: Dict = {}
+        gold_rows = measured & gold_mask
+        if gold_rep is not None:
+            gold = gold_rep.to_dict()
+            if gold_rows.sum() >= 3 and best_est != "mean" and len(Ym) > Xm.shape[1]:
+                pred = _fit_predict_for(best_est, self.seed)(Xm, Ym, X[gold_rows])
+                err = float(np.sqrt(np.nanmean((Y[gold_rows] - pred) ** 2)))
+                gold["gold_error"] = err
+                prov.note(f"gold (control-off) RMSE of '{best_est}': {err:.4f} vs forward "
+                          f"error {fold_res.mean_error:.4f} (VAL-04)")
+
         # ---- concept drift (VAL-06) -----------------------------------
         drift = val.concept_drift_test(fold_res.horizons, fold_res.fold_errors)
         prov.record_validation("forward_chaining", float(fold_res.mean_error),
@@ -156,13 +218,14 @@ class RegressionMachine:
             fold_errors=fold_res.fold_errors.tolist(), importance=importance,
             feedforward_candidates=ff_cands, quarantined_sensors=quarantined,
             low_variation_adjustable=low_adj, observed_only_unidentifiable=obs_only,
-            concept_drift=drift.to_dict(), decoupled=decoupled, provenance=prov, notes=notes)
+            concept_drift=drift.to_dict(), decoupled=decoupled, provenance=prov, notes=notes,
+            gold=gold, traces=trace_info)
 
     def _select_estimator(self, X, y, prov):
         best_est, best_err, best_fold = None, np.inf, None
         for est in self.candidate_estimators:
             fold = val.forward_validate(X, y, _fit_predict_for(est, self.seed), n_splits=4,
-                                        purge=1)
+                                        purge=self.purge, embargo=self.embargo)
             if np.isfinite(fold.mean_error) and fold.mean_error < best_err:
                 best_est, best_err, best_fold = est, fold.mean_error, fold
         if best_est is None:

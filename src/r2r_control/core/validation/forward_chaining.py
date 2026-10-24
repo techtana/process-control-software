@@ -71,8 +71,8 @@ def _rmse(yt, yp):
 def forward_validate(X: np.ndarray, y: np.ndarray,
                      fit_predict: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
                      n_splits: int = 5, purge: int = 0, min_train: Optional[int] = None,
-                     metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None
-                     ) -> ForwardValidationResult:
+                     metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
+                     embargo: int = 0) -> ForwardValidationResult:
     """Run forward-chaining validation; report the honest forward error (VAL-02).
 
     ``horizons`` records, per fold, how far the test block sits past the start of
@@ -82,7 +82,7 @@ def forward_validate(X: np.ndarray, y: np.ndarray,
     y = np.asarray(y, dtype=float)
     metric = metric or _rmse
     splits = forward_chaining_splits(len(X), n_splits=n_splits, purge=purge,
-                                     min_train=min_train)
+                                     min_train=min_train, embargo=embargo)
     errs, horizons = [], []
     for sp in splits:
         yp = fit_predict(X[sp.train_idx], y[sp.train_idx], X[sp.test_idx])
