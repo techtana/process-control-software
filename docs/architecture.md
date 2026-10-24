@@ -4,6 +4,11 @@ The self-contained handoff document (NFR-05): theory → workflow →
 implementation → validation, so a future session can continue without
 re-deriving context.
 
+> This document describes the design as intended. Where the implementation
+> falls short of it (gain fusion, uncertainty, simulated delay, MPC/MHE horizon,
+> planner targeting), see the known issues in
+> [`project-closure.md`](project-closure.md).
+
 ## The one idea: a noise floor everywhere
 
 Every estimation or control decision asks the same thing: is this variation

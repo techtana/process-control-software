@@ -4,6 +4,23 @@ Maps each requirement of the revised specification to its implementation
 (paths relative to `src/r2r_control/`) and test (paths relative to `tests/`).
 Requirement IDs also appear in the source docstrings.
 
+A row here means the requirement has an implementation. It does not mean full
+conformance. The closure review found the requirements below to be only
+partially met. KI numbers refer to section 8 of
+[`project-closure.md`](project-closure.md).
+
+| Requirement | Gap | KI |
+|---|---|---|
+| DQ-06, DQ-07, FB-01 | Closed-loop inline rows enter gain identification at full weight; the inline down-weight verdict is not applied; endogeneity is not detected | KI-1 |
+| FB-07, CF-03, SIM-02, A3 | Reported gain uncertainty ignores bias (2.4–4.8× too small); the pipeline uses the configured `rel_uncertainty_M`, not the identified uncertainty | KI-2 |
+| A4/E7, SIM-04 | Metrology delay only selects the route; the simulator applies no delay | KI-3 |
+| SIM-03, EP-08 | `mpc_horizon` and `px_weighting` are never read; the MHE is a one-step Kalman filter; move limits are applied by clipping | KI-4 |
+| §5 dynamics, SIM-05 | Identified `A` and FF gains are not passed to the pipeline's simulator | KI-5 |
+| EP-01/02/04/05 | Proposals are not targeted at the diagnosed gap; the GP is fitted to a zero response; coded units; uniform cost | KI-6 |
+| NF-05, REG-09, VAL-03, VAL-04, A6, E11 | Implemented but not wired into a component, and in places untested | KI-7 |
+| SIM-06/E10, DIAG-01 | No autocorrelation discount in intervals; no multiple-comparison control in FF leakage | KI-8 |
+| §13.5 | No `y_pred` consistency diagnostic | KI-9 |
+
 ## §1.3 / §1.4 Unification and load-bearing assumptions
 
 | Req | Implementation | Test |

@@ -1,5 +1,24 @@
 # Changelog
 
+## Project closure — 2026-10-24 (documentation only)
+
+No algorithm or behavior changes; the package version stays 0.2.0.
+
+- Added `docs/project-closure.md`. It covers the assumptions (guarded and
+  unguarded), applicability, methodology, limitations, nine known issues with
+  evidence and suggested fixes, the heuristic thresholds, and prioritized
+  future work.
+- Re-verified on Python 3.11 with numpy 2.4, pandas 3.1 and scipy 1.17:
+  64 tests pass with no warnings, and the walkthrough runs end to end.
+- README: corrected the test count (63 → 64), added a project-status section
+  and a documentation index, and corrected the layer order (`config` was
+  missing).
+- `docs/requirements-traceability.md`: added the requirements found to be only
+  partially met, mapped to the known issues.
+- `docs/architecture.md`: added a pointer to the known issues.
+- `.gitignore`: ignore generated files under `artifacts/` (the placeholder
+  `.gitkeep` stays).
+
 ## 0.2.0 — Re-architecture to revised specification
 
 Aligns the codebase with the revised design requirements specification

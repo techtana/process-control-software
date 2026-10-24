@@ -20,14 +20,31 @@ That floor is the **Marchenko–Pastur edge** for estimation and the
 where the assumptions hold and from **structure-preserving surrogates** where
 they do not.
 
+## Project status: closed (October 2026)
+
+Version 0.2.0 is the final release. It is an offline decision-support library
+validated on **synthetic data only**. Read
+[`docs/project-closure.md`](docs/project-closure.md) before using any output on
+real process data. That report covers the assumptions, applicability,
+methodology, limitations, known issues and future work. The most important
+known issues are:
+
+- Fusing closed-loop inline data with the DOE **biases the gain estimate**
+  (10–31% error, against 2–5% from the DOE alone).
+- The reported gain uncertainty is **2.4–4.8× too small**.
+- The simulator **does not delay measurements**.
+
 ## Install
 
 ```bash
 pip install -e .            # core (numpy, pandas, scipy)
 pip install -e ".[test]"    # + pytest, matplotlib
-pytest                      # 63 tests, incl. injected-fault and refusal tests
+pytest                      # 64 tests, incl. injected-fault and refusal tests
 python examples/walkthrough.py
 ```
+
+Verified at closure on Python 3.11 with numpy 2.4, pandas 3.1 and scipy 1.17:
+64 passed, no warnings.
 
 ## Repository layout (§16)
 
@@ -56,9 +73,12 @@ src/r2r_control/
 └── synthetic.py   fault-injectable closed-loop data generator (NFR-04)
 ```
 
-Imports flow only `contracts → core → estimation → {controller, metrics} →
-components → pipeline`, and no component imports another. `tests/test_architecture.py`
-enforces both rules, so breaking them fails the build.
+Imports flow only `contracts → config → core → estimation → {controller,
+metrics} → components → pipeline`, and no component imports another.
+`tests/test_architecture.py` enforces both rules, so breaking them fails the
+build. The top-level `artifacts/` directory is an empty, git-ignored place for
+locally generated outputs, such as diagnostic figures written via `figure_dir`.
+Nothing writes there by default.
 
 ### The corrected unification (§1.3)
 
@@ -101,6 +121,10 @@ Each component can also be used on its own; see
 | A5 control-off episodes are representative | tool-state check excludes anomalous episodes from gold | `core/validation/control_off.py` |
 | A6 injected excitation lands | closed-loop excitation discount on information gain | `experiment_planner/loop_status.py` |
 
+Each guard has blind spots, and further modelling assumptions (linear gain,
+superposition, exogenous identification data, run-to-run settling) have no guard
+at all. See sections 5.1 and 5.2 of the closure report.
+
 ## Honesty over convenience (NFR-06)
 
 The system reports hard limits instead of papering over them, and a test covers
@@ -118,5 +142,11 @@ each one:
   (SIM-06/E10).
 - It **refuses naive k-fold** on temporally ordered data (VAL-01).
 
-See [`docs/architecture.md`](docs/architecture.md) and
-[`docs/requirements-traceability.md`](docs/requirements-traceability.md).
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/project-closure.md`](docs/project-closure.md) | Closure report: assumptions, applicability, methodology, limitations, known issues, future work |
+| [`docs/architecture.md`](docs/architecture.md) | Theory, layers, assumption guards and workflow |
+| [`docs/requirements-traceability.md`](docs/requirements-traceability.md) | Requirement → implementation → test, plus conformance caveats |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history |
