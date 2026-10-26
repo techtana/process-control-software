@@ -23,7 +23,7 @@ from ...estimation.regularized.elastic_net import elastic_net_fit
 from ...estimation.regularized.stability_selection import stability_selection, StabilityResult
 from .decouple import decouple
 from .target import innovation_target
-from .select import low_variation, feedforward_candidates
+from .select import low_variation, feedforward_candidates, marginal_pvalues
 from .traces import trace_features, resample_traces, raw_retention_check
 from ...core.validation.control_off import control_off_gold
 
@@ -45,10 +45,12 @@ class RegressionResult:
     notes: List[str] = field(default_factory=list)
     gold: Dict = field(default_factory=dict)          # VAL-04 control-off holdout
     traces: Dict = field(default_factory=dict)        # REG-09 representation decisions
+    ff_importance: Optional[StabilityResult] = None   # FF-only screen behind the candidates
 
     def to_dict(self):
         d = dict(self.__dict__)
         d["importance"] = self.importance.to_dict()
+        d["ff_importance"] = None if self.ff_importance is None else self.ff_importance.to_dict()
         d["provenance"] = self.provenance.to_dict()
         return d
 
@@ -187,8 +189,21 @@ class RegressionMachine:
                   f"{self.block_size}); per-feature + group-wise frequency (REG-06/E12)")
 
         # ---- feedforward candidates, excluding quarantined (REG-04) ----
-        ff_cands = feedforward_candidates(importance, table.ff_cols, self.selection_threshold,
-                                          quarantined)
+        # Under control the knob moves encode the FF inputs the controller already
+        # uses, so selecting sensors alongside the knobs picks sensors that merely
+        # cancel that part of the knob signal (suppressors). Screen FF on its own,
+        # and require Bonferroni-corrected significance (REG-04).
+        ff_importance = importance
+        ff_idx = [feat_names.index(c) for c in table.ff_cols]
+        if control_present and table.ff_cols:
+            ff_importance = stability_selection(Xm[:, ff_idx], Ym, list(table.ff_cols),
+                                                n_resamples=self.n_stability_resamples,
+                                                block_size=self.block_size, rng=rng)
+            prov.note("feedforward screening on FF sensors only: knob moves under control "
+                      "carry the FF inputs and would act as suppressors (REG-04)")
+        ff_p = marginal_pvalues(Xm[:, ff_idx], Ym, list(table.ff_cols))
+        ff_cands = feedforward_candidates(ff_importance, table.ff_cols,
+                                          self.selection_threshold, quarantined, ff_p)
         prov.note(f"feedforward candidates: {ff_cands}"
                   + (f"; quarantined (phantom FF, A3/E2): {quarantined}" if quarantined else ""))
 
@@ -219,7 +234,7 @@ class RegressionMachine:
             feedforward_candidates=ff_cands, quarantined_sensors=quarantined,
             low_variation_adjustable=low_adj, observed_only_unidentifiable=obs_only,
             concept_drift=drift.to_dict(), decoupled=decoupled, provenance=prov, notes=notes,
-            gold=gold, traces=trace_info)
+            gold=gold, traces=trace_info, ff_importance=ff_importance)
 
     def _select_estimator(self, X, y, prov):
         best_est, best_err, best_fold = None, np.inf, None

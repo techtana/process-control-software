@@ -39,7 +39,7 @@ def test_dynamics_identifies_stable_ar(rng):
 
 
 def _imports(path):
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     return {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
 
 

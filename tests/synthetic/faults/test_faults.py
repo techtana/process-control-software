@@ -1,6 +1,7 @@
 """Injected-fault tests (NFR-04) for the assumption / edge-case guards."""
 
 import numpy as np
+import pytest
 
 from r2r_control import synthetic
 from r2r_control.components.diagnostics import DiagnosticsEngine
@@ -81,3 +82,15 @@ def test_ff_leakage_detected():
     sighted = leakage(FF)
     assert blind["feedforward_opportunities"]
     assert len(sighted["feedforward_opportunities"]) < len(blind["feedforward_opportunities"])
+
+
+@pytest.mark.parametrize("kw", [{}, {"n_knob": 10, "n_out": 10, "n_ff": 20, "doe_runs": 32}])
+def test_no_feedforward_candidates_without_feedforward_effect(kw):
+    # REG-04: with ff_leak=0 no sensor affects the open-loop output. Knob moves
+    # still encode the FF inputs the controller uses, so selecting sensors
+    # alongside the knobs picks them up as suppressors; none may be reported.
+    ds = synthetic.make_dataset(seed=0, doe_age_days=20, **kw)
+    res = RegressionMachine(seed=0).fit(
+        ds.inline, "y0", M=ds.truth.M, u0=ds.truth.u0, rel_uncertainty_M=0.1,
+        adjustable_features=ds.inline.knob_cols_used)
+    assert res.feedforward_candidates == []
