@@ -76,3 +76,23 @@ def test_pls_reduces_to_exact_fit_on_noise_free_data(rng):
     B_true = np.array([[1.0], [-2.0], [0.5]])
     B, _, _ = pls_fit(X, X @ B_true, 3)
     assert np.allclose(B, B_true, atol=1e-8)
+
+
+def test_covariance_cleaning_is_wired_into_the_ridge_path():
+    # NF-05 (KI-7): cleaning stabilizes the solve; 'cv' picks the strength by forward validation
+    from r2r_control.estimation.sensitivity.core import clean_gram
+    rng = np.random.default_rng(1)
+    n, p = 40, 12
+    Z = rng.standard_normal((n, 3))
+    X = Z @ rng.standard_normal((3, p)) + 0.3 * rng.standard_normal((n, p))
+    B = rng.standard_normal((p, 2))
+    Y = X @ B + 0.5 * rng.standard_normal((n, 2))
+    raw_min = np.linalg.eigvalsh(X.T @ X).min()
+    assert np.linalg.eigvalsh(clean_gram(X, "clip")).min() > raw_min
+    fit = SensitivityCore(estimator="ridge", covariance_cleaning="cv").fit(X, Y)
+    assert "cleaning_alpha" in fit.extras
+    assert any("covariance cleaning" in str(n) for n in fit.provenance.to_dict()["notes"])
+    svd = SensitivityCore(estimator="svd", covariance_cleaning="clip").fit(X, Y)
+    assert any("ignored" in str(n) for n in svd.provenance.to_dict()["notes"])
+    with pytest.raises(ValueError):
+        SensitivityCore(covariance_cleaning="shrink")

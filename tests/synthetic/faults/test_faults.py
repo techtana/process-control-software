@@ -73,8 +73,8 @@ def test_ff_leakage_detected():
     FF = sim.FF_gain
 
     def leakage(ff_model):
-        _, _, est, _, _, ff = sim._run_once(300, np.random.default_rng(0), t.M, t.M, FF,
-                                            ff_model)
+        _, _, est, _, _, ff, _ = sim._run_once(300, np.random.default_rng(0), t.M, t.M, FF,
+                                               ff_model)
         return DiagnosticsEngine().ff_leakage(est, ff, ds.ff_names)
 
     blind = leakage(np.zeros_like(FF))

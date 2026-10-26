@@ -62,6 +62,7 @@ def make_dataset(
     gain_drift: float = 0.0,
     ff_leak: float = 0.0,
     coupled_sensor_knob: Optional[Tuple[int, int]] = None,
+    estimator_gain: float = 0.3,
     include_doe: bool = True,
     doe_runs: int = 16,
     doe_age_days: float = 30.0,
@@ -72,7 +73,9 @@ def make_dataset(
     ``gain_drift`` scales the true gain linearly from ``1 - gain_drift/2`` to
     ``1 + gain_drift/2`` across the record (A1/E1). ``coupled_sensor_knob=(f, k)``
     makes FF sensor ``f`` a noisy copy of knob ``k``'s movement, so it lives in
-    the knob/M-error directions (A3/E2).
+    the knob/M-error directions (A3/E2). ``estimator_gain`` is the EWMA gain of
+    the controller's disturbance estimate (small values make it lag). The
+    controller's own output prediction is recorded as ``<y>_pred`` (§13.5).
     """
     rng = np.random.default_rng(seed)
     knob_names = [f"u{j}" for j in range(n_knob)]
@@ -107,6 +110,7 @@ def make_dataset(
     u_recommended = np.zeros((n_events, n_knob))
     u_used = np.zeros((n_events, n_knob))
     y = np.zeros((n_events, n_out))
+    y_pred = np.zeros((n_events, n_out))
     est_dist = np.zeros(n_out)
     for t in range(n_events):
         M_t = M * (1.0 + gain_drift * (t / max(n_events - 1, 1) - 0.5))
@@ -123,7 +127,9 @@ def make_dataset(
         u_used[t] = used
         y[t] = (disturbance[t] + ff_leak * ff_contribution + M_t @ (used - u0)
                 + noise_std * rng.standard_normal(n_out))
-        est_dist = 0.7 * est_dist + 0.3 * (y[t] - M_ctrl @ (used - u0))
+        y_pred[t] = est_dist + M_ctrl @ (used - u0)
+        est_dist = ((1 - estimator_gain) * est_dist
+                    + estimator_gain * (y[t] - M_ctrl @ (used - u0)))
 
     if coupled_sensor_knob is not None:
         fi, ki = coupled_sensor_knob
@@ -149,6 +155,7 @@ def make_dataset(
     for j, nm in enumerate(out_names):
         data[nm] = [y_cells[t][j] for t in range(n_events)]
         data[f"{nm}_time"] = y_time
+        data[f"{nm}_pred"] = y_pred[:, j]
     data["control_off"] = control_off
 
     inline = EventTable(
@@ -158,6 +165,7 @@ def make_dataset(
         ff_cols=ff_names, y_cols=out_names,
         y_time_cols={nm: f"{nm}_time" for nm in out_names},
         time_col="timestamp", control_off_col="control_off",
+        y_pred_cols={nm: f"{nm}_pred" for nm in out_names},
     )
     doe = (_make_doe(rng, M, FF_gain, u0, knob_names, ff_names, out_names, doe_runs,
                      noise_std, aliased=aliased_doe) if include_doe else None)

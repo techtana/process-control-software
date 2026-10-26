@@ -28,6 +28,7 @@ from .gain_mismatch import gain_mismatch, gain_drift_monitor
 from .qr_attribution import qr_attribution
 from .variance_decomp import variance_decomposition
 from .achievability import achievability_verdict
+from .consistency import model_consistency
 
 UNIDENTIFIABLE = "unidentifiable from available data — excitation required"
 
@@ -41,6 +42,7 @@ class Diagnosis:
     variance_decomposition: Dict
     achievability: Dict
     gain_drift: Optional[Dict] = None
+    consistency: Optional[Dict] = None        # §13.5 y_pred-based check, when available
     precedence_log: List[str] = field(default_factory=list)
     routed_to_planner: List[str] = field(default_factory=list)
     figures: List[str] = field(default_factory=list)
@@ -99,7 +101,11 @@ class DiagnosticsEngine:
 
     def diagnose(self, y_observed, u_used, M_model, state_est=None, ff_inputs=None,
                  innovation=None, ff_names=None, measured_mask=None, figure_dir=None,
-                 monitor_gain_drift: bool = False) -> Diagnosis:
+                 monitor_gain_drift: bool = False, y_pred=None,
+                 exclude=None) -> Diagnosis:
+        """Run the DIAG-07 tree. ``y_pred`` (the controller's own output prediction)
+        enables the §13.5 consistency check, which separates an inaccurate ``M``
+        from FB tracking lag; ``exclude`` drops events (e.g. control-off) from it."""
         log: List[str] = []
         routed: List[str] = []
 
@@ -118,6 +124,18 @@ class DiagnosticsEngine:
             routed.append("process gain (excitation required)")
             log.append(f"2. gain mismatch: {UNIDENTIFIABLE}")
 
+        # (2b) model consistency from y_pred (§13.5): M error vs tracking lag
+        cons = None
+        if y_pred is not None:
+            cons = model_consistency(y_observed, y_pred, u_used, M_model, ff_inputs,
+                                     measured_mask, exclude)
+            log.append(f"2b. model consistency (y_pred): {cons['verdict']} ({cons['detail']})")
+            if cons["verdict"] == "M_inaccurate" and gm.get("diagnosis") == UNIDENTIFIABLE:
+                gm = dict(gm, diagnosis="gain_model_inconsistent (from y_pred)",
+                          gain_underestimated=None)
+            if cons["verdict"] == "M_or_FF_model_error":
+                routed.append("gain vs FF model (FF-independent excitation required)")
+
         # (3) FF leakage
         if state_est is not None and ff_inputs is not None:
             ff = ff_leakage(state_est, ff_inputs, ff_names, self.alpha)
@@ -131,7 +149,7 @@ class DiagnosticsEngine:
             qr = {"primary_suspect": UNIDENTIFIABLE, "status": UNIDENTIFIABLE}
             routed.append("Controller-QR vs State-QR (excitation required)")
             log.append(f"4. QR attribution: {UNIDENTIFIABLE}")
-        elif gm.get("gain_underestimated"):
+        elif gm.get("gain_underestimated") or (cons and cons["verdict"] == "M_inaccurate"):
             qr = {"primary_suspect": "deferred",
                   "status": "deferred: resolve gain mismatch first (DIAG-07/E5)",
                   "reason": "QR effects are confounded with the gain error (FB-08)"}
@@ -160,6 +178,8 @@ class DiagnosticsEngine:
             notes.append(f"routed to experiment planner: {routed}")
         if gd and gd["drift_detected"]:
             notes.append("gain drift detected — re-identify (A1/E1)")
+        if cons and cons["verdict"] in ("M_inaccurate", "fb_tracking_lag"):
+            notes.append(f"model consistency (§13.5): {cons['verdict']}")
 
         figures = []
         if figure_dir is not None:
@@ -168,5 +188,6 @@ class DiagnosticsEngine:
                                 figure_dir, measured_mask)
         return Diagnosis(excitation=exc, ff_leakage=ff, gain_mismatch=gm, qr_attribution=qr,
                          variance_decomposition=vd, achievability=ach, gain_drift=gd,
-                         precedence_log=log, routed_to_planner=routed, figures=figures,
+                         consistency=cons, precedence_log=log, routed_to_planner=routed,
+                         figures=figures,
                          notes=notes)

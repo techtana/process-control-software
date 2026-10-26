@@ -32,6 +32,8 @@ class EventTable:
     y_time_cols: Dict[str, str] = field(default_factory=dict)
     time_col: str = "timestamp"
     control_off_col: Optional[str] = None
+    trace_cols: List[str] = field(default_factory=list)    # array-valued traces (REG-09)
+    y_pred_cols: Dict[str, str] = field(default_factory=dict)   # y -> controller prediction
 
     def __post_init__(self) -> None:
         if len(self.knob_cols_recommended) != len(self.knob_cols_used):
@@ -44,7 +46,7 @@ class EventTable:
 
     def _all_required_cols(self) -> List[str]:
         cols = [self.time_col, *self.knob_cols_recommended, *self.knob_cols_used,
-                *self.ff_cols, *self.y_cols]
+                *self.ff_cols, *self.y_cols, *self.trace_cols, *self.y_pred_cols.values()]
         if self.control_off_col:
             cols.append(self.control_off_col)
         return cols
@@ -108,6 +110,16 @@ class EventTable:
                 out[i, j] = arr.mean() if reduce == "mean" else np.median(arr)
         return out
 
+    def y_pred_matrix(self) -> Optional[np.ndarray]:
+        """Controller's own output predictions, aligned with ``y_cols`` (§13.5), or None."""
+        if not self.y_pred_cols:
+            return None
+        out = np.full((self.n_events, self.n_out), np.nan)
+        for j, c in enumerate(self.y_cols):
+            if c in self.y_pred_cols:
+                out[:, j] = self.frame[self.y_pred_cols[c]].to_numpy(dtype=float)
+        return out
+
     def control_off_mask(self) -> np.ndarray:
         if self.control_off_col is None:
             return np.zeros(self.n_events, dtype=bool)
@@ -120,4 +132,5 @@ class EventTable:
             knob_cols_used=self.knob_cols_used,
             ff_cols=self.ff_cols, y_cols=self.y_cols, y_time_cols=self.y_time_cols,
             time_col=self.time_col, control_off_col=self.control_off_col,
+            trace_cols=self.trace_cols, y_pred_cols=self.y_pred_cols,
         )

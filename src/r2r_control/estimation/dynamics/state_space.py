@@ -27,10 +27,11 @@ def identify_first_order_dynamics(disturbance: np.ndarray,
     A_T, *_ = np.linalg.lstsq(d[:-1], d[1:], rcond=None)
     A = A_T.T
     max_eig = float(np.max(np.abs(np.linalg.eigvals(A))))
-    if max_eig >= 1.5:
+    if max_eig >= 1.0:
+        # a non-stationary disturbance belongs to the drift term, not to A (KI-5)
         if provenance is not None:
-            provenance.note(f"identified A unstable (max|eig|={max_eig:.2f}); clipping to "
-                            f"diagonal AR estimate")
+            provenance.note(f"identified A not stable (max|eig|={max_eig:.3f}); clipping to "
+                            f"a diagonal AR estimate with |a|<=0.99")
         A = np.diag(np.clip(np.diag(A), -0.99, 0.99))
     return A
 

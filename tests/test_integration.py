@@ -18,7 +18,7 @@ def _cfg(truth, **kw):
 def test_pipeline_end_to_end_and_serializable():
     ds = synthetic.make_dataset(seed=0, doe_age_days=20)
     res = GatePipeline(_cfg(ds.truth)).run(ds.inline, ds.doe, doe_age_days=20)
-    assert np.linalg.norm(res.fb.M - ds.truth.M) / np.linalg.norm(ds.truth.M) < 0.35
+    assert np.linalg.norm(res.fb.M - ds.truth.M) / np.linalg.norm(ds.truth.M) < 0.1
     assert res.plan.proposals
     assert res.diagnosis.excitation["sufficient"]
     assert res.regression.decoupled
@@ -46,3 +46,18 @@ def test_config_rejects_unknown_fields():
     import pytest
     with pytest.raises(AttributeError):
         default_run_config(not_a_field=1)
+
+
+def test_pipeline_propagates_identified_dynamics_and_uncertainty():
+    # KI-2/KI-5: the simulator gets the identified A, FF gains and gain uncertainty
+    ds = synthetic.make_dataset(seed=0, doe_age_days=20)
+    pipe = GatePipeline(_cfg(ds.truth))
+    res = pipe.run(ds.inline, ds.doe, doe_age_days=20, run_planner=False)
+    sim = pipe.simulator_factory(res.fb)({})
+    assert np.allclose(sim.plant.A_d, res.fb.A)
+    assert sim.FF_gain is not None and np.allclose(sim.FF_gain, res.fb.FF_gain)
+    assert np.isclose(sim.rel_uncertainty_M, res.fb.relative_uncertainty())
+    assert np.max(np.abs(np.linalg.eigvals(res.fb.A))) < 1.0
+    over = GatePipeline(_cfg(ds.truth, rel_uncertainty_M=0.001))
+    val, note = over.effective_rel_uncertainty_M(res.fb)
+    assert val == 0.001 and "WARNING" in note

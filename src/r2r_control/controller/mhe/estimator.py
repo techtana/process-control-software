@@ -1,8 +1,14 @@
 """Moving-horizon estimator (State QR) — SIM-03.
 
-A Kalman-filter realization of the MHE (the limiting case of the moving-horizon
-MAP estimate). The estimator weights (State QR) set the process-noise vs
-measurement-noise trade-off and are independent of the controller weights.
+A Kalman-filter realization of the MHE. Without inequality constraints the
+moving-horizon MAP estimate with a Kalman arrival cost equals the Kalman filter,
+so this recursive form is exact for the unconstrained case. The horizon matters
+for *late* measurements: the simulator keeps the filter at the time of the
+latest measurement it has received, folds in a measurement that arrives up to
+``mhe_horizon`` events late (time updates up to its own timestamp, then the
+measurement update), and predicts forward to the present with ``A^k`` (A4/E7).
+The estimator weights (State QR) set the process-noise vs measurement-noise
+trade-off and are independent of the controller weights.
 """
 
 from __future__ import annotations
@@ -42,3 +48,7 @@ class KalmanMHE:
         self.d_hat = self.A_d @ self.d_hat
         self.P = self.A_d @ self.P @ self.A_d.T + self.Q
         return self.d_hat
+
+    def predict_ahead(self, k: int) -> np.ndarray:
+        """``A^k d_hat``: the disturbance ``k`` events past the filter's time."""
+        return np.linalg.matrix_power(self.A_d, max(int(k), 0)) @ self.d_hat

@@ -13,3 +13,7 @@ htmlcov/
 scratch*/
 .venv/
 venv/
+
+# locally generated outputs (keep the placeholder)
+artifacts/*
+!artifacts/.gitkeep

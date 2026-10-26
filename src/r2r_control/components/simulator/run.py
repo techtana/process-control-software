@@ -5,6 +5,13 @@ error by Monte Carlo. The no-control arm is the algebraic counterfactual from
 the shared service (§CF). Built on the controller/ layer (MHE + MPC, with
 out-of-sequence routing, A4/E7) and the metrics/ layer. Deterministic given a
 seed (SIM-07).
+
+Metrology timing (KI-3): the measurement of event ``s`` becomes available
+``metrology_delay`` events later, at the end of event ``s + metrology_delay``,
+and only every ``sampling_rate``-th event is measured. A measurement that is at
+most ``mhe_horizon`` events late is folded into the estimator state; a later one
+is routed to the slow-bias estimator (A4/E7). The controller acts on the
+disturbance predicted from the latest estimate (``A^k``).
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ import numpy as np
 
 from ...controller.mhe.estimator import KalmanMHE
 from ...controller.mhe.oosm import SlowBiasEstimator, route_measurement
-from ...controller.mpc.controller import mpc_move
+from ...controller.mpc.controller import MPCController
 from ...core.counterfactual.reconstruct import reconstruct
 from ...metrics.capability import Metrics, compute_metrics
 
@@ -42,6 +49,8 @@ class ControllerConfig:
     move_limit: float = 0.5
     sampling_rate: int = 1
     metrology_delay: int = 0
+    u_lower: Optional[List[float]] = None   # absolute knob bounds (optional)
+    u_upper: Optional[List[float]] = None
 
 
 @dataclass
@@ -56,6 +65,7 @@ class SimulationResult:
     metrics_on: Metrics
     metrics_off: Metrics
     config: Dict = field(default_factory=dict)
+    y_pred: Optional[np.ndarray] = None    # controller's own output prediction (§13.5)
 
     def to_dict(self):
         return {"metrics_on": self.metrics_on.to_dict(),
@@ -92,8 +102,13 @@ class Simulator:
         R = c.mhe_R * (self.plant.meas_noise_std ** 2) * np.eye(n_out)
         mhe = KalmanMHE(A_d, Q, R, d0=np.zeros(n_out), P0=np.eye(n_out))
         slow_bias = SlowBiasEstimator(n_out)
-        # measurements delayed past the MHE horizon bypass the state update (A4/E7)
-        route = route_measurement(c.metrology_delay, c.mhe_horizon)
+        mpc = MPCController(M_model, self.u0, c.mpc_Q, c.mpc_R, horizon=c.mpc_horizon,
+                            move_limit=c.move_limit, A_d=A_d, u_lower=c.u_lower,
+                            u_upper=c.u_upper)
+        delay = max(int(c.metrology_delay), 0)
+        rate = max(int(c.sampling_rate), 1)
+        # measurements later than the MHE horizon bypass the state update (A4/E7)
+        route = route_measurement(delay, c.mhe_horizon)
 
         d = rng.standard_normal(n_out) * self.plant.process_noise_std
         drift = np.zeros(n_out)
@@ -101,10 +116,14 @@ class Simulator:
         y = np.zeros((n_steps, n_out))
         u = np.zeros((n_steps, n_knob))
         state_est = np.zeros((n_steps, n_out))
-        innovation = np.zeros((n_steps, n_out))
+        innovation = np.full((n_steps, n_out), np.nan)
         disturbance = np.zeros((n_steps, n_out))
         ff_inputs = np.zeros((n_steps, n_ff))
+        d_pred_used = np.zeros((n_steps, n_out))     # disturbance prediction behind u_t
+        y_pred = np.zeros((n_steps, n_out))          # controller's prediction of y_t
 
+        kf_time = -1                                 # time index of the filter's state
+        pending = []                                 # (release_time, s, y_s, ctrl_s, ff_s)
         u_prev = self.u0.copy()
         for t in range(n_steps):
             drift = drift + self.plant.drift_std * rng.standard_normal(n_out)
@@ -119,30 +138,43 @@ class Simulator:
                 ff_plant = FF_plant @ ff
                 ff_model = FF_model @ ff
 
-            desired = self.targets - (mhe.predict_state() + slow_bias.correction()) - ff_model
-            u_t = mpc_move(M_model, desired, u_prev, self.u0, c.mpc_Q, c.mpc_R, c.move_limit)
+            # control decision from the disturbance predicted for event t
+            d_hat_t = mhe.predict_ahead(t - kf_time)
+            d_pred_used[t] = d_hat_t
+            u_t = mpc.move(mpc.disturbance_trajectory(d_hat_t, slow_bias.correction()),
+                           self.targets, u_prev, ff_now=ff_model)
             u[t] = u_t
+            y_pred[t] = M_model @ (u_t - self.u0) + d_hat_t + slow_bias.correction() + ff_model
 
             y_t = (disturbance[t] + ff_plant + M_plant @ (u_t - self.u0)
                    + self.plant.meas_noise_std * rng.standard_normal(n_out))
             y[t] = y_t
+            if t % rate == 0:
+                pending.append((t + delay, t, y_t, M_model @ (u_t - self.u0), ff_model))
 
-            if t % max(c.sampling_rate, 1) == 0:
-                innov = mhe.innovation(y_t, M_model @ (u_t - self.u0), ff_model)
-                innovation[t] = innov
+            # measurements arriving now (in time order; constant delay keeps them ordered)
+            while pending and pending[0][0] <= t:
+                _, s_idx, y_s, ctrl_s, ff_s = pending.pop(0)
                 if route == "state_update":
+                    while kf_time < s_idx - 1:
+                        mhe.propagate()
+                        kf_time += 1
+                    innov = mhe.innovation(y_s, ctrl_s, ff_s)
                     mhe.update(innov)
+                    kf_time = s_idx
+                    innovation[s_idx] = innov
                 else:
-                    mhe.propagate()
-                    slow_bias.incorporate_late(innov)
-            else:
-                mhe.propagate()
-            state_est[t] = mhe.d_hat + slow_bias.correction()
+                    resid = y_s - ctrl_s - ff_s - d_pred_used[s_idx] - slow_bias.correction()
+                    slow_bias.incorporate_late(resid)
+                    innovation[s_idx] = resid
+            state_est[t] = mhe.predict_ahead(t - kf_time) + slow_bias.correction()
             u_prev = u_t
-        return y, u, state_est, innovation, disturbance, ff_inputs
+        return y, u, state_est, innovation, disturbance, ff_inputs, y_pred
 
     def simulate(self, n_steps: int = 300, n_mc: Optional[int] = None) -> SimulationResult:
-        delay = max(self.controller.metrology_delay, 1)
+        # minimum-variance horizon: the controller acts on information that is
+        # metrology_delay + 1 events old (KI-3)
+        delay = max(int(self.controller.metrology_delay), 0) + 1
         if n_mc is None:
             n_mc = 30 if (self.rel_uncertainty_M > 0 or self.rel_uncertainty_FF > 0) else 1
         on_samples, off_samples, last = [], [], None
@@ -155,17 +187,18 @@ class Simulator:
             if self.FF_gain is not None and self.rel_uncertainty_FF > 0:
                 FF_model = self.FF_gain * (1.0 + self.rel_uncertainty_FF *
                                            rng.standard_normal(self.FF_gain.shape))
-            y_on, u, est, innov, dist, ff = self._run_once(n_steps, rng, self.M, M_model,
-                                                           self.FF_gain, FF_model)
+            y_on, u, est, innov, dist, ff, yp = self._run_once(n_steps, rng, self.M, M_model,
+                                                               self.FF_gain, FF_model)
             y_off = reconstruct(y_on, self.M, u, self.u0,
                                 u0_source="simulator baseline").y_nocontrol
             on_samples.append(compute_metrics(y_on, self.targets, self.lsl, self.usl, delay))
             off_samples.append(compute_metrics(y_off, self.targets, self.lsl, self.usl, delay))
-            last = (y_on, y_off, u, est, innov, dist, ff)
-        y_on, y_off, u, est, innov, dist, ff = last
+            last = (y_on, y_off, u, est, innov, dist, ff, yp)
+        y_on, y_off, u, est, innov, dist, ff, yp = last
         return SimulationResult(
             y_on=y_on, y_off=y_off, u=u, state_est=est, innovation=innov, disturbance=dist,
             ff_inputs=ff, metrics_on=_aggregate(on_samples), metrics_off=_aggregate(off_samples),
+            y_pred=yp,
             config={"n_mc": n_mc, "rel_uncertainty_M": self.rel_uncertainty_M,
                     "controller": dict(self.controller.__dict__),
                     "plant": {k: (v.tolist() if isinstance(v, np.ndarray) else v)

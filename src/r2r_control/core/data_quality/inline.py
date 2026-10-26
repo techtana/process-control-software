@@ -10,13 +10,21 @@ from ...contracts.provenance import ProvenanceLog, Verdict
 from ...contracts.schema import EventTable
 from ..excitation.vif import vif
 from ..excitation.spectrum import regressor_spectrum
+from ..excitation.feedback import feedback_test
 from .. import stats
 from .decisions import QualityReport
 
 
 def assess_inline(table: EventTable, provenance: ProvenanceLog, vif_warn: float = 10.0,
-                  min_effective_samples: int = 8) -> QualityReport:
-    """Detect confounding, divergence, metrology sparsity, drift => decision (DQ-04..06)."""
+                  min_effective_samples: int = 8, downweight: float = 0.5,
+                  feedback_alpha: float = 0.01) -> QualityReport:
+    """Detect confounding, feedback, divergence, sparsity, drift => decision (DQ-04..06).
+
+    A ``DOWN_WEIGHT`` verdict carries ``weight = downweight`` (DQ-07). Separately,
+    ``gain_usable`` is False when the knob settings respond to past outputs
+    (closed-loop feedback, M3): such rows are endogenous and must not enter gain
+    identification, whatever their conditioning (DQ-06).
+    """
     diagnostics: Dict = {}
     R = table.regressors()
     names = table.regressor_names
@@ -25,6 +33,12 @@ def assess_inline(table: EventTable, provenance: ProvenanceLog, vif_warn: float 
     diagnostics["vif"] = {n: float(x) for n, x in zip(names, v)}
     diagnostics["condition_number"] = spec.condition_number
     diagnostics["effective_rank_entropy"] = spec.effective_rank_entropy
+
+    fb = feedback_test(table.used_knobs(), table.y_matrix(),
+                       measured=np.all(table.measured_mask().reshape(table.n_events, -1), axis=1),
+                       exclude=table.control_off_mask(), knob_names=table.knob_cols_used,
+                       alpha=feedback_alpha)
+    diagnostics["feedback"] = fb.to_dict()
 
     div = table.recommended_used_divergence()
     diagnostics["rec_used_divergence_var"] = {
@@ -60,10 +74,20 @@ def assess_inline(table: EventTable, provenance: ProvenanceLog, vif_warn: float 
         verdict = Verdict.DOWN_WEIGHT
         reasons.append(f"sparse metrology: min effective measured count {min_eff} "
                        f"< {min_effective_samples}")
+    if fb.detected:
+        reasons.append(f"closed-loop feedback: knob settings respond to past outputs "
+                       f"(Granger F-test, adjusted p={fb.pvalue:.1e}) => rows endogenous, "
+                       f"excluded from gain identification (DQ-06)")
     if not reasons:
         reasons.append("inline excitation adequate in measured directions")
     rationale = "; ".join(reasons)
-    provenance.assume("inline gain directly identifiable", not excitation_deficient,
-                      "closed-loop confounding violates direct gain ID (DQ-04)")
-    provenance.decide("inline", verdict, rationale, diagnostics)
-    return QualityReport("inline", verdict, rationale, diagnostics)
+    weight = downweight if verdict == Verdict.DOWN_WEIGHT else 1.0
+    gain_usable = not fb.detected
+    provenance.assume("inline gain directly identifiable",
+                      gain_usable and not excitation_deficient,
+                      "closed-loop feedback and/or confounding violate direct gain ID (DQ-04)",
+                      {"feedback_detected": fb.detected,
+                       "excitation_deficient": bool(excitation_deficient)})
+    provenance.decide("inline", verdict, rationale, diagnostics, weight)
+    return QualityReport("inline", verdict, rationale, diagnostics, weight,
+                         gain_usable=gain_usable)

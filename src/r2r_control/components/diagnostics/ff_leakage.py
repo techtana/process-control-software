@@ -25,10 +25,11 @@ def ff_leakage(state_est: np.ndarray, ff_inputs: np.ndarray,
     d_ff = np.diff(ff, axis=0)
     names = ff_names or [f"ff{j}" for j in range(ff.shape[1])]
     n = len(d_state)
-    leaking, corrs = [], {}
+    n_out = d_state.shape[1]
+    raw_p, best_r = [], []
     for j in range(ff.shape[1]):
         best = 0.0
-        for k in range(d_state.shape[1]):
+        for k in range(n_out):
             if np.std(d_ff[:, j]) < 1e-9 or np.std(d_state[:, k]) < 1e-9:
                 continue
             r = np.corrcoef(d_ff[:, j], d_state[:, k])[0, 1]
@@ -36,12 +37,27 @@ def ff_leakage(state_est: np.ndarray, ff_inputs: np.ndarray,
                 best = r
         if n > 4 and abs(best) < 1:
             z = 0.5 * np.log((1 + best) / (1 - best)) * np.sqrt(n - 3)
-            p = 2 * norm.sf(abs(z))
+            p_one = 2 * norm.sf(abs(z))
+            p = 1.0 - (1.0 - p_one) ** n_out      # Šidák: best of n_out correlations
         else:
             p = 1.0
-        corrs[names[j]] = {"max_abs_corr": float(abs(best)), "pvalue": float(p)}
-        if p < alpha and abs(best) > 0.2:
+        raw_p.append(float(p))
+        best_r.append(float(abs(best)))
+    # Holm step-down across FF inputs (family-wise error rate alpha, KI-8)
+    m = len(raw_p)
+    order = np.argsort(raw_p)
+    adj = np.ones(m)
+    running = 0.0
+    for rank, j in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * raw_p[j]))
+        adj[j] = running
+    leaking, corrs = [], {}
+    for j in range(m):
+        corrs[names[j]] = {"max_abs_corr": best_r[j], "pvalue": raw_p[j],
+                           "pvalue_holm": float(adj[j])}
+        if adj[j] < alpha and best_r[j] > 0.2:
             leaking.append(names[j])
     return {"leaking_inputs": leaking, "correlations": corrs,
             "feedforward_opportunities": leaking,
-            "detail": "estimated-state vs FF correlation; significant => FF leakage"}
+            "detail": ("estimated-state vs FF correlation (Šidák over outputs, Holm over "
+                       "inputs); significant => FF leakage")}

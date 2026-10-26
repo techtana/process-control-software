@@ -88,10 +88,62 @@ def ljung_box(residuals: np.ndarray, lags: int = 10) -> TestResult:
     )
 
 
-# Dickey-Fuller critical values (constant, no trend), large sample with small-N
-# adjustments folded into the interpolation used by MacKinnon.  We use the
-# common tabulated asymptotic values; adequate for a use/down-weight gate.
+# Dickey-Fuller critical values (constant, no trend). Asymptotic values, kept for
+# reference; the test itself uses MacKinnon's (2010) finite-sample response
+# surfaces crit(T) = b0 + b1/T + b2/T^2 + b3/T^3 (KI-8).
 _ADF_CRIT = {"1%": -3.43, "5%": -2.86, "10%": -2.57}
+_ADF_CRIT_SURFACE = {"1%": (-3.43035, -6.5393, -16.786, -79.433),
+                     "5%": (-2.86154, -2.8903, -4.234, -40.040),
+                     "10%": (-2.56677, -1.5384, -2.809, 0.0)}
+# MacKinnon (1994) p-value response surface, constant-only, one variable
+_ADF_P_SMALL = (2.1659, 1.4412, 0.038269)
+_ADF_P_LARGE = (1.7339, 0.93202, -0.12745, -0.0010368)
+_ADF_TAU_STAR, _ADF_TAU_MIN, _ADF_TAU_MAX = -1.61, -18.83, 2.74
+
+
+def adf_critical_values(nobs: int) -> Dict[str, float]:
+    """MacKinnon (2010) finite-sample ADF critical values (constant, no trend)."""
+    T = max(int(nobs), 1)
+    return {k: float(b0 + b1 / T + b2 / T ** 2 + b3 / T ** 3)
+            for k, (b0, b1, b2, b3) in _ADF_CRIT_SURFACE.items()}
+
+
+def adf_pvalue(tau: float) -> float:
+    """MacKinnon (1994) approximate p-value for the ADF statistic (constant, no trend)."""
+    if not np.isfinite(tau):
+        return float("nan")
+    if tau > _ADF_TAU_MAX:
+        return 1.0
+    if tau < _ADF_TAU_MIN:
+        return 0.0
+    coef = _ADF_P_SMALL if tau <= _ADF_TAU_STAR else _ADF_P_LARGE
+    return float(_sps.norm.cdf(sum(c * tau ** k for k, c in enumerate(coef))))
+
+
+def effective_sample_size(x: np.ndarray, max_lag: Optional[int] = None) -> float:
+    """Autocorrelation-adjusted sample size ``n / (1 + 2 Σ ρ_k)`` (KI-8).
+
+    Uses Geyer's initial positive sequence: autocorrelations are summed in
+    adjacent pairs until a pair sum turns negative. Bounded to ``[1, n]``.
+    """
+    v = np.asarray(x, dtype=float)
+    v = v[np.isfinite(v)]
+    n = len(v)
+    if n < 4:
+        return float(n)
+    v = v - v.mean()
+    denom = float(v @ v)
+    if denom <= 0:
+        return float(n)
+    K = min(n - 2, max_lag if max_lag is not None else n // 3)
+    rho = np.array([float(v[k:] @ v[:-k]) / denom for k in range(1, K + 1)])
+    total = 0.0
+    for i in range(0, len(rho) - 1, 2):
+        pair = rho[i] + rho[i + 1]
+        if pair < 0:
+            break
+        total += pair
+    return float(np.clip(n / (1.0 + 2.0 * total), 1.0, n))
 
 
 def adf_test(x: np.ndarray, max_lag: Optional[int] = None) -> TestResult:
@@ -126,15 +178,17 @@ def adf_test(x: np.ndarray, max_lag: Optional[int] = None) -> TestResult:
     X = np.column_stack(cols)
     beta, resid, se = _ols(target, X)
     tstat = beta[1] / se[1] if se[1] > 0 else float("nan")
-    reject = tstat < _ADF_CRIT["5%"]
+    crit = adf_critical_values(len(target))
+    reject = bool(np.isfinite(tstat) and tstat < crit["5%"])
     return TestResult(
         name="adf",
         statistic=float(tstat),
-        pvalue=None,
-        crit_values=_ADF_CRIT,
-        reject_null=bool(reject),
+        pvalue=adf_pvalue(tstat),
+        crit_values=crit,
+        reject_null=reject,
         null_hypothesis="unit root present (non-stationary / drifting)",
-        detail=f"used_lag={max_lag}; reject@5% => stationary",
+        detail=f"used_lag={max_lag}; MacKinnon finite-sample critical values (T={len(target)}); "
+               f"reject@5% => stationary",
     )
 
 

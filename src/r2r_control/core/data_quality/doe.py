@@ -104,4 +104,5 @@ def assess_doe(design: np.ndarray, factor_names: List[str], age_days: float,
         reasons.append("DOE within range, fresh, aligned => use for wide-range gain/curvature")
     rationale = "; ".join(reasons)
     provenance.decide("DOE", verdict, rationale, diagnostics, weight)
-    return QualityReport("DOE", verdict, rationale, diagnostics, weight)
+    return QualityReport("DOE", verdict, rationale, diagnostics, weight,
+                         gain_usable=verdict != Verdict.REJECT)

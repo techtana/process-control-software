@@ -11,7 +11,7 @@ Deterministic given its inputs; no external ML dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
@@ -29,6 +29,7 @@ class GaussianProcess:
     length_scale: float = 1.0
     signal_var: float = 1.0
     noise_var: float = 1e-4
+    categorical_dims: Optional[List[int]] = None   # E11: overlap kernel on these dims
 
     def __post_init__(self):
         self._X = None
@@ -37,22 +38,60 @@ class GaussianProcess:
         self._alpha = None
         self._y_mean = 0.0
 
+    def kernel(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        if self.categorical_dims:
+            return mixed_kernel(A, B, self.length_scale, self.signal_var, self.categorical_dims)
+        return rbf_kernel(A, B, self.length_scale, self.signal_var)
+
     def fit(self, X: np.ndarray, y: np.ndarray) -> "GaussianProcess":
         X = np.atleast_2d(np.asarray(X, dtype=float))
         y = np.asarray(y, dtype=float).reshape(-1)
         self._X = X
         self._y_mean = float(y.mean())
         yc = y - self._y_mean
-        K = rbf_kernel(X, X, self.length_scale, self.signal_var)
+        K = self.kernel(X, X)
         K[np.diag_indices_from(K)] += self.noise_var
         self._L = cho_factor(K, lower=True)
         self._alpha = cho_solve(self._L, yc)
         self._y = y
         return self
 
+    def log_marginal_likelihood(self) -> float:
+        """log p(y | X, θ) of the fitted model (for hyperparameter selection)."""
+        yc = self._y - self._y_mean
+        L = self._L[0]
+        return float(-0.5 * yc @ self._alpha - np.sum(np.log(np.abs(np.diag(L))))
+                     - 0.5 * len(yc) * np.log(2 * np.pi))
+
+    def fit_hyperparameters(self, X: np.ndarray, y: np.ndarray,
+                            length_scales=(0.1, 0.2, 0.4, 0.8, 1.6, 3.2),
+                            noise_fracs=(1e-4, 1e-3, 1e-2, 1e-1, 0.3)) -> "GaussianProcess":
+        """Choose length scale and noise by marginal likelihood on a grid, then fit.
+
+        ``signal_var`` is set to the response variance; ``noise_var`` is a fraction
+        of it. Used when real responses are available (EP-04, KI-6), so the
+        surrogate reflects the observed response surface instead of fixed guesses.
+        """
+        y = np.asarray(y, dtype=float).reshape(-1)
+        sv = float(np.var(y)) if np.var(y) > 1e-12 else 1.0
+        best, best_ll = None, -np.inf
+        for ls in length_scales:
+            for nf in noise_fracs:
+                gp = GaussianProcess(ls, sv, nf * sv, self.categorical_dims)
+                try:
+                    ll = gp.fit(X, y).log_marginal_likelihood()
+                except np.linalg.LinAlgError:
+                    continue
+                if ll > best_ll:
+                    best, best_ll = (ls, nf * sv), ll
+        if best is not None:
+            self.length_scale, self.noise_var = best
+        self.signal_var = sv
+        return self.fit(X, y)
+
     def predict(self, Xs: np.ndarray, return_std: bool = True) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         Xs = np.atleast_2d(np.asarray(Xs, dtype=float))
-        Ks = rbf_kernel(Xs, self._X, self.length_scale, self.signal_var)
+        Ks = self.kernel(Xs, self._X)
         mean = Ks @ self._alpha + self._y_mean
         if not return_std:
             return mean, None
@@ -87,19 +126,13 @@ class GaussianProcess:
         kernel correlation).
         """
         candidate = np.atleast_2d(candidate)
-        kxc = rbf_kernel(ref, candidate, self.length_scale, self.signal_var).reshape(-1)
-        kcc = float(rbf_kernel(candidate, candidate, self.length_scale, self.signal_var)
-                    [0, 0]) + self.noise_var
-        v = cho_solve(self._L, rbf_kernel(candidate, self._X, self.length_scale,
-                                          self.signal_var).T).reshape(-1)
-        kc_self = rbf_kernel(candidate, self._X, self.length_scale, self.signal_var).reshape(-1)
-        denom = kcc - float(kc_self @ v)
-        denom = max(denom, 1e-9)
-        # reduction in variance at ref points ~ correlation^2 / denom
-        kxc_pred = rbf_kernel(ref, self._X, self.length_scale, self.signal_var) @ \
-            cho_solve(self._L, rbf_kernel(candidate, self._X, self.length_scale,
-                                          self.signal_var).T).reshape(-1)
-        corr = kxc - kxc_pred
+        kxc = self.kernel(ref, candidate).reshape(-1)
+        kcc = float(self.kernel(candidate, candidate)[0, 0]) + self.noise_var
+        kc_self = self.kernel(candidate, self._X).reshape(-1)
+        v = cho_solve(self._L, kc_self)
+        denom = max(kcc - float(kc_self @ v), 1e-9)
+        # reduction in variance at ref points ~ (posterior covariance)^2 / denom
+        corr = kxc - self.kernel(ref, self._X) @ v
         return float(np.mean(corr ** 2) / denom)
 
     def expected_information_gain(self, Xs: np.ndarray) -> np.ndarray:

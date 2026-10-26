@@ -39,13 +39,18 @@ def main():
     # ----- Component 1: FB identification ----------------------------------
     fb = FBIdentifier(estimator="svd", seed=0).identify(ds.inline, ds.doe, doe_age_days=20)
     gain_err = np.linalg.norm(fb.M - t.M) / np.linalg.norm(t.M)
-    print(f"\n[1] FB identification: relative gain error = {gain_err:.3f}")
+    print(f"\n[1] FB identification: relative gain error = {gain_err:.3f} "
+          f"(gain source: {fb.gain_source})")
     print(f"    effective rank {fb.identifiable.effective_rank}/"
-          f"{fb.identifiable.n_directions}, relative uncertainty "
-          f"{fb.relative_uncertainty():.3f}")
+          f"{fb.identifiable.n_directions}, reported relative uncertainty "
+          f"{fb.relative_uncertainty():.3f} (variance {fb.variance_rel_uncertainty():.3f}, "
+          f"bias {fb.bias_rel_uncertainty:.3f})")
     print(f"    u0 source: {fb.baseline_info.get('source')}")
     print(f"    assumptions relied on: {list(fb.as_artifact().assumption_ledger())}")
-    print(f"    refused (FB-08): {[a.name for a in fb.provenance.assumptions if not a.holds]}")
+    failed = [a.name for a in fb.provenance.assumptions if not a.holds]
+    print(f"    closed-loop inline rows excluded from gain (feedback detected): "
+          f"{'inline gain directly identifiable' in failed}")
+    print(f"    refused (FB-08): {[n for n in failed if 'estimator tuning' in n]}")
 
     # ----- Component 2: experiment planner ---------------------------------
     for loop in ("open", "closed"):
@@ -85,7 +90,7 @@ def main():
     # ----- Component 5: diagnostics (DIAG-07 precedence tree) --------------
     diag = DiagnosticsEngine().diagnose(
         res.y_on, res.u, fb.M, state_est=res.state_est, ff_inputs=res.ff_inputs,
-        innovation=res.innovation, ff_names=ds.ff_names)
+        innovation=res.innovation, ff_names=ds.ff_names, y_pred=res.y_pred)
     print("\n[5] diagnostics precedence:")
     for line in diag.precedence_log:
         print(f"    {line}")
@@ -98,8 +103,11 @@ def main():
         rel_uncertainty_M=fb.relative_uncertainty())
     print(f"\n[6] regression: estimator={reg.estimator}, forward error="
           f"{reg.forward_error:.3f}, decoupled={reg.decoupled}")
+    freq = {n: round(f, 2) for n, f, _ in reg.importance.ranked() if n in ds.ff_names}
     print(f"    feedforward candidates: {reg.feedforward_candidates}; "
           f"quarantined (phantom FF): {reg.quarantined_sensors}")
+    print(f"    FF selection frequency: {freq} (threshold 0.6; control-off episodes held "
+          f"out as gold, gold RMSE {reg.gold.get('gold_error', float('nan')):.3f})")
 
     # ----- guards firing on injected faults (§1.4 / §15) --------------------
     print("\n[guards]")
@@ -124,6 +132,22 @@ def main():
     few = compute_metrics(res.y_on[:5], t.targets, lsl, usl, n_effective=np.full(t.n_out, 5),
                           min_samples=8, finite_sample_ci=True)
     print(f"    E10 five-sample Cpk -> {few.to_dict()['note']}")
+
+    lagging = synthetic.make_dataset(seed=3, estimator_gain=0.03)
+    under = synthetic.make_dataset(seed=3, gain_underestimate=2.0)
+    for label, dset in (("lagging estimator", lagging), ("gain underestimated", under)):
+        inl = dset.inline
+        c = DiagnosticsEngine().diagnose(inl.y_matrix(), inl.used_knobs(),
+                                         dset.truth.config["M_ctrl"], ff_inputs=inl.ff(),
+                                         y_pred=inl.y_pred_matrix(),
+                                         exclude=inl.control_off_mask()).consistency
+        print(f"    §13.5 y_pred consistency, {label} -> {c['verdict']}")
+
+    for delay in (0, 2):
+        r_d = factory({"mpc_R": 0.05, "move_limit": 1.0, "metrology_delay": delay,
+                       "mhe_horizon": 3}).simulate(n_steps=300)
+        print(f"    metrology delay {delay} (in MHE horizon) -> controlled std "
+              f"{r_d.metrics_on.std}")
     print("\nDone.")
 
 

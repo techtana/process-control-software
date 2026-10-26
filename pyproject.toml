@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "r2r-control"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run-to-run (R2R) process control: identification, experiment planning, MHE/MPC simulation, controller optimization, diagnostics, and broad predictive regression — unified by variance accounting against a noise floor."
 readme = "README.md"
 requires-python = ">=3.9"

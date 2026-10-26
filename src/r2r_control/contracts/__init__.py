@@ -7,10 +7,12 @@ from .measured import _is_measured, is_measured
 from .shapes import check_shape_contract, ShapeContractError
 from .schema import EventTable
 from .provenance import ProvenanceLog, Decision, Assumption, Verdict
-from .artifact import ModelArtifact, LOAD_BEARING_ASSUMPTIONS
+from .artifact import (ModelArtifact, LOAD_BEARING_ASSUMPTIONS, variance_rel_uncertainty,
+                       expected_frobenius_error2)
 
 __all__ = [
     "_is_measured", "is_measured", "check_shape_contract", "ShapeContractError",
     "EventTable", "ProvenanceLog", "Decision", "Assumption", "Verdict",
-    "ModelArtifact", "LOAD_BEARING_ASSUMPTIONS",
+    "ModelArtifact", "LOAD_BEARING_ASSUMPTIONS", "variance_rel_uncertainty",
+    "expected_frobenius_error2",
 ]

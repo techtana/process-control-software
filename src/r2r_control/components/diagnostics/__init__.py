@@ -6,7 +6,8 @@ from .gain_mismatch import gain_mismatch, gain_drift_monitor
 from .qr_attribution import qr_attribution
 from .variance_decomp import variance_decomposition
 from .achievability import achievability_verdict
+from .consistency import model_consistency
 
 __all__ = ["DiagnosticsEngine", "Diagnosis", "excitation_sufficiency", "UNIDENTIFIABLE",
            "ff_leakage", "gain_mismatch", "gain_drift_monitor", "qr_attribution",
-           "variance_decomposition", "achievability_verdict"]
+           "variance_decomposition", "achievability_verdict", "model_consistency"]
