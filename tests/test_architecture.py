@@ -66,7 +66,7 @@ def test_layer_dependency_order():
         src_layer, src_comp = _layer_of(parts)
         if src_layer not in LAYER_RANK:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             targets = []
             if isinstance(node, ast.ImportFrom):
